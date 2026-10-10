@@ -1,0 +1,44 @@
+{
+  "name": "@quinntyx/pi-session-quota",
+  "version": "0.1.0",
+  "description": "Pi extension for CLIProxyAPI tmux session quota attribution and asynchronous quota waiting",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@types/node": "^22.19.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://git.quinntyx.dev/quinntyx/pi-session-quota.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "cliproxyapi",
+    "quota",
+    "tmux"
+  ]
+}
