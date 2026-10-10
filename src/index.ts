@@ -48,7 +48,12 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
     ): Promise<"retry" | "aborted"> => {
       const client = await quotaClientForContext(ctx, fetchImpl);
       const session = (await getSession()) ?? "";
-      return waiter.waitUntilRetry(client, session, ctx, retryAfterSeconds, requiredPoints);
+      pi.events.emit("session-quota:wait-state", { active: true, reason: "provisioned_quota_exhausted" });
+      try {
+        return await waiter.waitUntilRetry(client, session, ctx, retryAfterSeconds, requiredPoints);
+      } finally {
+        pi.events.emit("session-quota:wait-state", { active: false, reason: "provisioned_quota_exhausted" });
+      }
     };
 
     let resumeProvisioned = false;

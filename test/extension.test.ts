@@ -20,9 +20,11 @@ const quotaStatus = {
 
 function harness(fetchImpl: typeof fetch, resolveSession: () => Promise<string | null>) {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+  const emitted: Array<{ name: string; data: any }> = [];
   let command: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
   let complete: ((prefix: string) => unknown) | undefined;
   const pi = {
+    events: { emit(name: string, data: any) { emitted.push({ name, data }); } },
     on(name: string, handler: (event: any, ctx: any) => any) {
       const list = handlers.get(name) ?? [];
       list.push(handler);
@@ -36,7 +38,7 @@ function harness(fetchImpl: typeof fetch, resolveSession: () => Promise<string |
     },
   } as unknown as ExtensionAPI;
   createExtension({ fetch: fetchImpl, resolveSession })(pi);
-  return { handlers, get command() { return command!; }, get complete() { return complete!; } };
+  return { handlers, emitted, get command() { return command!; }, get complete() { return complete!; } };
 }
 
 function context(notifications: Array<[string, string | undefined]> = []): ExtensionContext {
@@ -223,6 +225,10 @@ test("provisioned error gets informative display text without losing retry metad
   }, ctx);
   assert.equal(result.continue, true);
   assert.deepEqual(result.entries, [{ type: "context_edit", targetId: "replaced-error", replacement: null }]);
+  assert.deepEqual(extension.emitted, [
+    { name: "session-quota:wait-state", data: { active: true, reason: "provisioned_quota_exhausted" } },
+    { name: "session-quota:wait-state", data: { active: false, reason: "provisioned_quota_exhausted" } },
+  ]);
 });
 
 test("structured provisioned errors also get explanatory text; weekly and normal failures are unchanged", async () => {

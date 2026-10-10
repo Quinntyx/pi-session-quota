@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { createConnection } from "node:net";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
@@ -13,6 +14,29 @@ import { QuotaWaiter } from "../src/waiter.js";
 // Exercise the installed runtime, not a mocked ExtensionAPI. This is opt-in so
 // ordinary package tests don't depend on a particular machine's Pi installation.
 const sdkPath = process.env.PI_QUOTA_TEST_SDK;
+// Optional cross-process coverage: Pi quota -> pi-sock -> Python timeout logic.
+const sockExtension = process.env.PI_QUOTA_TEST_SOCK_EXTENSION;
+const python = process.env.PI_QUOTA_TEST_PYTHON;
+const pythonSource = process.env.PI_QUOTA_TEST_SUBAGENTS_SOURCE;
+const crossProcess = Boolean(sockExtension && python && pythonSource);
+const sockName = `quota-timeout-integration-${process.pid}`;
+if (crossProcess) process.env.PI_SOCK_NAME = sockName;
+function socketState(socketPath: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let data = "";
+    socket.on("error", reject);
+    socket.on("connect", () => socket.write(`${JSON.stringify({id:"state",type:"get_state"})}\n`));
+    socket.on("data", chunk => {
+      data += chunk.toString();
+      const line = data.split("\n")[0];
+      if (!data.includes("\n")) return;
+      const message = JSON.parse(line);
+      socket.end();
+      if (!message.success) reject(new Error(message.error)); else resolve(message.data);
+    });
+  });
+}
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 async function eventually(predicate: () => boolean, label: string) {
   const deadline = Date.now() + 12_000;
@@ -81,10 +105,14 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
     await writeFile(join(directory,"models.json"),JSON.stringify({providers:{cliproxyapi:{baseUrl,api,apiKey:api === "openai-codex-responses" ? `e30.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:"test"}})).toString("base64url")}.test` : "test",models:[{id:"quota-test",name:"Quota test",reasoning:false,input:["text"],contextWindow:10000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}));
     const waiter = new QuotaWaiter();
     const settingsManager = sdk.SettingsManager.inMemory({transport:"sse",retry:{enabled:false},compaction:{enabled:false},cacheWarming:{enabled:false}});
+    const factories = [{factory:createExtension({resolveSession:async()=>"workflow",waiter}),source:"quota-test"}];
+    if (crossProcess) factories.push({factory:(await import(pathToFileURL(sockExtension!).href)).default,source:"sock-test"});
     const loader = new sdk.DefaultResourceLoader({cwd:directory,agentDir:directory,settingsManager,
       noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,disabledBuiltinExtensions:["mcp"],
-      extensionFactories:[{factory:createExtension({resolveSession:async()=>"workflow",waiter}),source:"quota-test"}]});
+      extensionFactories:factories});
     let session: any;
+    let child: ChildProcess | undefined;
+    let childDone: Promise<{code: number | null; stdout: string; stderr: string}> | undefined;
     try {
       await loader.reload();
       const runtime = await sdk.ModelRuntime.create({authPath:join(directory,"auth.json"),modelsPath:join(directory,"models.json")});
@@ -111,6 +139,29 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
       assert.equal(session.isStreaming,true,"UI must retain an active run");
       assert.match(displayedErrors[0],/Reached provisioned quota cap, waiting for reset/,"the actual displayed failure must distinguish pending quota waits");
       assert.deepEqual(errors,[],"quota hooks must not throw");
+      if (crossProcess) {
+        const socketPath = join(homedir(),".pi","pi-sock",`${sockName}.sock`);
+        const before = await socketState(socketPath);
+        assert.equal(before.quotaWait.active,true,"real socket must report the quota pause");
+        assert.equal(before.isIdle,false,"quota pause cannot be mistaken for an idle outcome");
+        let childStdout = "";
+        let childStderr = "";
+        child = spawn(python!, [join(import.meta.dirname,"fixtures","quota-timeout-client.py"),socketPath,pythonSource!,api === "openai-codex-responses" ? "async" : "sync",outcome], {stdio:["ignore","pipe","pipe"]});
+        child.stdout!.on("data", chunk => { childStdout += chunk.toString(); });
+        child.stderr!.on("data", chunk => { childStderr += chunk.toString(); });
+        childDone = new Promise((resolve,reject) => {
+          child!.on("error",reject);
+          child!.on("close",code=>resolve({code,stdout:childStdout,stderr:childStderr}));
+        });
+        await eventually(()=>childStdout.includes("CLIENT_STARTED"),"Python waiter starts");
+        await delay(350); // Deliberately exceeds its 100ms execution allowance.
+        assert.equal(child.exitCode,null,`parent waiter must remain pending: ${childStderr}`);
+        assert.equal(child.signalCode,null);
+        assert.equal(settled.length,0,"no settlement after the Python execution deadline");
+        const during = await socketState(socketPath);
+        assert.equal(during.quotaWait.active,true);
+        assert.ok(during.quotaWait.elapsedMs > before.quotaWait.elapsedMs + 300);
+      }
       if (outcome === "abort") {
         await session.abort();
       } else {
@@ -121,6 +172,13 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
       }
       await run;
       await eventually(()=>settled.length===1,"one terminal settlement");
+      if (childDone) {
+        const result = await childDone;
+        assert.equal(result.code,0,result.stderr);
+        assert.match(result.stdout,/"settled"/);
+        const after = await socketState(join(homedir(),".pi","pi-sock",`${sockName}.sock`));
+        assert.equal(after.quotaWait.active,false,"terminal outcomes release the pause clock");
+      }
       assert.deepEqual(errors,[]);
       if (outcome === "abort") {
         assert.equal(settled[0].aborted,true);
@@ -136,7 +194,9 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
         if(outcome === "weekly") assert.match(last.errorMessage,api === "openai-codex-responses" ? /ChatGPT usage limit/ : /weekly_quota_exhausted/);
       }
     } finally {
+      if (child?.exitCode === null && child.signalCode === null) child.kill();
       if (session?.isStreaming) await session.abort();
+      if (crossProcess && session) await session.extensionRunner.emit({type:"session_shutdown"});
       session?.dispose();
       server.closeAllConnections();
       await new Promise<void>(resolve=>server.close(()=>resolve()));

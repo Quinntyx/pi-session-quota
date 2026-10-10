@@ -24,6 +24,7 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 - Waiting is asynchronous and abort-aware. The TUI remains responsive to Escape, commands, and steering. Status is polled at most every 30 seconds and successful quota commands wake the poll immediately.
 - Before a retry, the failed assistant entry is omitted from model context with Pi's append-only `context_edit` boundary mechanism. Pi then rebuilds the request from current session context and consumes steering queued during the wait. HTTP request bytes are never replayed.
 - The run does not settle while waiting. This keeps callers such as `pi-subagents` pending until a genuine completion, cancellation, or terminal weekly quota error.
+- Quota waits also publish `session-quota:wait-state` through Pi's extension bus. Updated `pi-sock` exposes a cumulative `quotaWait` pause clock so updated `pi-subagents` can suspend execution/root deadlines instead of timing out a still-pending run. These orchestration components must be updated together; suppressing settlement alone cannot prevent an older caller's wall-clock timeout.
 
 ## Commands
 
@@ -91,3 +92,19 @@ PI_QUOTA_TEST_SDK=/absolute/path/to/pi-coding-agent/dist/index.js npm test
 ```
 
 This exercises real Pi sessions using both OpenAI Chat Completions and native Codex Responses against a local fake proxy: the run and its Future stay pending with zero `agent_settled` events during quota waits; queued steering is applied to the rebuilt request; cancellation and weekly exhaustion settle exactly once. Without the environment variable these machine-specific tests are skipped.
+
+To also exercise actual Python sync/async socket waiters beyond a deliberately
+short execution deadline, set the following alongside `PI_QUOTA_TEST_SDK`:
+
+```sh
+PI_QUOTA_TEST_SOCK_EXTENSION=/absolute/path/to/pi-sock/index.ts \
+PI_QUOTA_TEST_PYTHON=/absolute/path/to/venv/bin/python \
+PI_QUOTA_TEST_SUBAGENTS_SOURCE=/absolute/path/to/pi-subagents/src \
+PI_QUOTA_TEST_SDK=/absolute/path/to/pi-coding-agent/dist/index.js npm test
+```
+
+The six cases verify the socket reports a live pause, the Python caller remains
+pending beyond its timeout, and resume, weekly exhaustion, and explicit abort
+release the pause and settle exactly once. Python task/root budget regressions
+are also covered in `pi-subagents`. Existing notebook kernels retain imported
+Python code; restart/reset them before creating pools after an update.
