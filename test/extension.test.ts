@@ -168,3 +168,28 @@ test("commands use current model auth and enforce explicit sessions outside tmux
   assert.equal(requests.at(-1)!.url, "http://proxy.test/v1/session-quota/sessions/interactive");
   assert.equal(requests.at(-1)!.body, JSON.stringify({ cap: 20 }));
 });
+
+for (const code of ["provisioned_quota_exhausted", "weekly_quota_exhausted", "usage_limit_reached"]) {
+  test(`native Codex friendly errors are caught only for provisioned header: ${code}`, async () => {
+    let calls = 0;
+    const extension = harness(async () => { calls++; return response(quotaStatus); }, async () => "renamed-two");
+    const ctx = context();
+    await extension.handlers.get("after_provider_response")![0]({status:429,headers:{"X-CLIProxyAPI-Quota-Code":code,"X-CLIProxyAPI-Quota-Retry-After":"1","X-CLIProxyAPI-Quota-Required-Points":"0.5"}},ctx);
+    const result = await extension.handlers.get("turn_end")![0]({type:"turn_end",message:{...assistantError,errorMessage:"You have hit your ChatGPT usage limit."},messageEntryId:"native-failure"},ctx);
+    assert.equal(calls > 0, code === "provisioned_quota_exhausted");
+    assert.equal(result?.continue, code === "provisioned_quota_exhausted" ? true : undefined);
+  });
+}
+
+
+test("skim defaults to ten points and reports the actual transfer", async () => {
+  const notifications: Array<[string, string | undefined]> = [];
+  const requests: RequestInit[] = [];
+  const h = harness(async (_input, init = {}) => {
+    requests.push(init);
+    return new Response(JSON.stringify({ transferred: 3, quota: quotaStatus }), { status: 200 });
+  }, async () => "renamed-two");
+  await h.command("skim", context(notifications) as ExtensionCommandContext);
+  assert.equal(requests[0].body, JSON.stringify({ amount: 10 }));
+  assert.match(notifications[0][0], /Skimmed 3 quota points/);
+});

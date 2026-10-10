@@ -97,11 +97,16 @@ export class QuotaClient {
     await this.request("/sessions", { method: "DELETE", signal });
   }
 
-  async skim(amount: number, signal?: AbortSignal): Promise<void> {
-    await this.request("/skim", {
+  async skim(amount: number, signal?: AbortSignal): Promise<number> {
+    const body = await this.request("/skim", {
       method: "POST",
       signal,
       body: JSON.stringify({ amount }),
     });
+    const transferred = body && typeof body === "object" && "transferred" in body ? body.transferred : undefined;
+    if (typeof transferred !== "number" || !Number.isFinite(transferred) || transferred < 0 || transferred > amount) {
+      throw new Error("Quota API returned an invalid skim result");
+    }
+    return transferred;
   }
 }

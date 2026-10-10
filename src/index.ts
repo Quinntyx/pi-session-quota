@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, TurnEndEvent } from "@earendil-works/pi-coding-agent";
 import { splitArguments } from "./args.js";
-import { parseProvisionedQuotaError } from "./errors.js";
+import { parseProvisionedQuotaError, type ProvisionedQuotaErrorInfo } from "./errors.js";
 import { formatStatus } from "./format.js";
 import { formatPoints, parsePoints } from "./points.js";
 import type { FetchLike } from "./quota-client.js";
@@ -51,10 +51,30 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
     };
 
     let resumeProvisioned = false;
+    let responseQuota: ProvisionedQuotaErrorInfo | null = null;
+
+    pi.on("turn_start", () => { responseQuota = null; });
+    pi.on("after_provider_response", (event, ctx) => {
+      if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider)) return;
+      // Native Codex intentionally replaces all 429 bodies with a friendly
+      // upstream-limit message. Headers retain our admission failure identity.
+      const headers = new Headers(event.headers);
+      responseQuota = null;
+      if (event.status !== 429 || headers.get("x-cliproxyapi-quota-code") !== "provisioned_quota_exhausted") return;
+      const retry = Number(headers.get("x-cliproxyapi-quota-retry-after"));
+      const required = Number(headers.get("x-cliproxyapi-quota-required-points"));
+      responseQuota = {
+        ...(Number.isFinite(retry) && retry > 0 ? { retryAfterSeconds: retry } : {}),
+        ...(Number.isFinite(required) && required > 0 ? { requiredPoints: required } : {}),
+      };
+    });
 
     pi.on("turn_end", async (event: TurnEndEvent, ctx) => {
       if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider)) return;
-      const info = assistantQuotaError(event.message);
+      const message = event.message as { role?: string; stopReason?: string };
+      const info = assistantQuotaError(event.message) ??
+        (message.role === "assistant" && message.stopReason === "error" ? responseQuota : null);
+      responseQuota = null;
       if (!info) { resumeProvisioned = false; return; }
 
       const result = await waitForQuota(ctx, info.retryAfterSeconds, info.requiredPoints);
@@ -120,9 +140,9 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
           if (action === "skim") {
             if (args.length > 1) throw new Error("Usage: /quota skim [points|percent%]");
             const { points } = parsePoints(args[0] ?? "10");
-            await client.skim(points, ctx.signal);
+            const transferred = await client.skim(points, ctx.signal);
             waiter.wake();
-            ctx.ui.notify(`Skimmed ${formatPoints(points)} quota points`, "info");
+            ctx.ui.notify(`Skimmed ${formatPoints(transferred)} quota points`, "info");
             return;
           }
 

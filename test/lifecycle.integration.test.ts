@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { zstdDecompressSync } from "node:zlib";
 import { test } from "node:test";
 import { createExtension } from "../src/index.js";
 import { QuotaWaiter } from "../src/waiter.js";
@@ -21,8 +22,9 @@ async function eventually(predicate: () => boolean, label: string) {
   }
 }
 
+for (const api of ["openai-completions", "openai-codex-responses"] as const) {
 for (const outcome of ["resume", "weekly", "abort"] as const) {
-  test(`real Pi lifecycle: ${outcome}`, {skip: !sdkPath, timeout: 25_000}, async (t) => {
+  test(`real Pi lifecycle: ${api}: ${outcome}`, {skip: !sdkPath, timeout: 25_000}, async (t) => {
     const sdk = await import(pathToFileURL(sdkPath!).href);
     const directory = await mkdtemp(join(tmpdir(), "pi-session-quota-lifecycle-"));
     let available = 0;
@@ -38,16 +40,30 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
             {session:"",cap:150,remaining:0,held:0,available:0}]}));
         return;
       }
-      let body = "";
-      for await (const part of req) body += part;
+      const parts: Buffer[] = [];
+      for await (const part of req) parts.push(Buffer.from(part));
+      const raw = Buffer.concat(parts);
+      const body = (req.headers["content-encoding"] === "zstd" ? zstdDecompressSync(raw) : raw).toString();
       requests.push({header:req.headers["x-cliproxyapi-session"] as string|undefined,body:JSON.parse(body)});
       if (available === 0 || weekly) {
         const code = weekly ? "weekly_quota_exhausted" : "provisioned_quota_exhausted";
-        res.writeHead(429,{"content-type":"application/json","retry-after":"0"});
-        res.end(JSON.stringify({error:{code,type:code,message:weekly?"Weekly quota exhausted":"Out of provisioned quota",retry_after_seconds:60,required_points:0.5}}));
+        res.writeHead(429,{"content-type":"application/json","retry-after":"0",
+          "x-cliproxyapi-quota-code":code,"x-cliproxyapi-quota-retry-after":"60","x-cliproxyapi-quota-required-points":"0.5"});
+        res.end(JSON.stringify({error:{code,type:code,reason:"quota exceeded",message:weekly?"Weekly quota exhausted":"Out of provisioned quota",retry_after_seconds:60,required_points:0.5}}));
         return;
       }
       res.writeHead(200,{"content-type":"text/event-stream"});
+      if (api === "openai-codex-responses") {
+        const item = {type:"message",id:"msg-test",role:"assistant",content:[{type:"output_text",text:"completed",annotations:[]}],status:"completed"};
+        const emit = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+        emit({type:"response.output_item.added",output_index:0,item:{...item,content:[],status:"in_progress"}});
+        emit({type:"response.content_part.added",item_id:item.id,output_index:0,content_index:0,part:{type:"output_text",text:"",annotations:[]}});
+        emit({type:"response.output_text.delta",item_id:item.id,output_index:0,content_index:0,delta:"completed"});
+        emit({type:"response.output_item.done",output_index:0,item});
+        emit({type:"response.completed",response:{id:"resp-test",status:"completed",output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}}});
+        res.end();
+        return;
+      }
       const base = {id:"completion-test",object:"chat.completion.chunk",created:1,model:"quota-test"};
       res.write(`data: ${JSON.stringify({...base,choices:[{index:0,delta:{role:"assistant",content:"completed"},finish_reason:null}]})}
 
@@ -62,9 +78,9 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
     await new Promise<void>(resolve => server.listen(0,"127.0.0.1",resolve));
     const address = server.address() as {port:number};
     const baseUrl = `http://127.0.0.1:${address.port}/v1`;
-    await writeFile(join(directory,"models.json"),JSON.stringify({providers:{cliproxyapi:{baseUrl,api:"openai-completions",apiKey:"test",models:[{id:"quota-test",name:"Quota test",reasoning:false,input:["text"],contextWindow:10000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}));
+    await writeFile(join(directory,"models.json"),JSON.stringify({providers:{cliproxyapi:{baseUrl,api,apiKey:api === "openai-codex-responses" ? `e30.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:"test"}})).toString("base64url")}.test` : "test",models:[{id:"quota-test",name:"Quota test",reasoning:false,input:["text"],contextWindow:10000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}));
     const waiter = new QuotaWaiter();
-    const settingsManager = sdk.SettingsManager.inMemory({retry:{enabled:false},compaction:{enabled:false},cacheWarming:{enabled:false}});
+    const settingsManager = sdk.SettingsManager.inMemory({transport:"sse",retry:{enabled:false},compaction:{enabled:false},cacheWarming:{enabled:false}});
     const loader = new sdk.DefaultResourceLoader({cwd:directory,agentDir:directory,settingsManager,
       noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,disabledBuiltinExtensions:["mcp"],
       extensionFactories:[{factory:createExtension({resolveSession:async()=>"workflow",waiter}),source:"quota-test"}]});
@@ -105,13 +121,13 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
         assert.equal(requests.length,1);
       } else {
         assert.equal(requests.length,2,"retry must be a rebuilt request, not an opaque replay");
-        assert.ok(JSON.stringify(requests[1].body.messages).includes("Apply this steering before retrying"));
-        assert.ok(!JSON.stringify(requests[1].body.messages).includes("provisioned_quota_exhausted"));
+        assert.ok(JSON.stringify(requests[1].body.messages ?? requests[1].body.input).includes("Apply this steering before retrying"));
+        assert.ok(!JSON.stringify(requests[1].body.messages ?? requests[1].body.input).includes("provisioned_quota_exhausted"));
         assert.equal(requests[0].header,"workflow");
         assert.equal(requests[1].header,"workflow");
         const last = session.messages.at(-1);
         assert.equal(last.stopReason,outcome === "weekly" ? "error" : "stop");
-        if(outcome === "weekly") assert.match(last.errorMessage,/weekly_quota_exhausted/);
+        if(outcome === "weekly") assert.match(last.errorMessage,api === "openai-codex-responses" ? /ChatGPT usage limit/ : /weekly_quota_exhausted/);
       }
     } finally {
       if (session?.isStreaming) await session.abort();
@@ -121,4 +137,6 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
       execFileSync("trash",[directory]);
     }
   });
+}
+
 }

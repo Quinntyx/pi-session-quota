@@ -68,7 +68,9 @@ Status payload:
 }
 ```
 
-The local admission failure must contain error code and type `provisioned_quota_exhausted`, with `retry_after_seconds` and optional `required_points` (the admission estimate), so tiny positive balances do not cause repeated rejected requests. A weekly failure uses `weekly_quota_exhausted` and is not caught.
+The local admission failure contains error code and type `provisioned_quota_exhausted`, with `retry_after_seconds` and optional `required_points` (the admission estimate), so tiny positive balances do not cause repeated rejected requests. A weekly failure uses `weekly_quota_exhausted` and is not caught.
+
+Because the native Codex client replaces HTTP 429 bodies with a generic ChatGPT limit message, the proxy also supplies `X-CLIProxyAPI-Quota-Code`, `X-CLIProxyAPI-Quota-Retry-After`, and `X-CLIProxyAPI-Quota-Required-Points`. The extension uses the response hook to retain this metadata, without treating unrelated upstream 429 errors as provisioned-quota waits. Error bodies include a `quota exceeded` reason so native Codex leaves retry scheduling to this extension instead of doing its own HTTP backoff.
 
 ## Development
 
@@ -85,4 +87,4 @@ The repository itself has no runtime dependencies beyond Pi and Node.js.
 PI_QUOTA_TEST_SDK=/absolute/path/to/pi-coding-agent/dist/index.js npm test
 ```
 
-This exercises real Pi sessions against a local fake proxy: the run and its Future stay pending with zero `agent_settled` events during quota waits; queued steering is applied to the rebuilt request; cancellation and weekly exhaustion settle exactly once. Without the environment variable these machine-specific tests are skipped.
+This exercises real Pi sessions using both OpenAI Chat Completions and native Codex Responses against a local fake proxy: the run and its Future stay pending with zero `agent_settled` events during quota waits; queued steering is applied to the rebuilt request; cancellation and weekly exhaustion settle exactly once. Without the environment variable these machine-specific tests are skipped.

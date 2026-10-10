@@ -14,7 +14,7 @@ test("quota client uses encoded names, model auth, and documented bodies", async
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const fetchImpl: typeof fetch = async (input, init = {}) => {
     requests.push({ url: String(input), init });
-    return new Response(JSON.stringify(status), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(String(input).endsWith("/skim") ? { transferred: 3, quota: status } : status), { status: 200, headers: { "content-type": "application/json" } });
   };
   const client = new QuotaClient(
     { endpoint: "https://proxy.example/v1/session-quota", headers: { authorization: "Bearer model-key" } },
@@ -24,7 +24,7 @@ test("quota client uses encoded names, model auth, and documented bodies", async
   await client.setCap("renamed work/✓", 50);
   await client.clear("renamed work/✓");
   await client.clearAll();
-  await client.skim(10);
+  assert.equal(await client.skim(10), 3);
   await client.getStatus();
 
   assert.equal(requests[0].url, "https://proxy.example/v1/session-quota/sessions/renamed%20work%2F%E2%9C%93");
