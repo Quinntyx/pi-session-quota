@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, TurnEndEvent } from "@earendil-works/pi-coding-agent";
 import { splitArguments } from "./args.js";
+import { quotaCompletions } from "./completions.js";
 import { parseProvisionedQuotaError, type ProvisionedQuotaErrorInfo } from "./errors.js";
 import { formatStatus } from "./format.js";
 import { formatPoints, parsePoints } from "./points.js";
@@ -69,6 +70,23 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
       };
     });
 
+    pi.on("message_end", (event, ctx) => {
+      if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider)) return;
+      const message = event.message;
+      if (message.role !== "assistant" || message.stopReason !== "error") return;
+      const info = assistantQuotaError(message) ?? responseQuota;
+      if (!info) return;
+      // Keep the admission metadata for turn_end after replacing Codex's
+      // misleading generic 429 text in the finalized, displayed message.
+      responseQuota = info;
+      return {
+        message: {
+          ...message,
+          errorMessage: "Reached provisioned quota cap, waiting for reset. Workflow remains active; this is not a terminal error.",
+        },
+      };
+    });
+
     pi.on("turn_end", async (event: TurnEndEvent, ctx) => {
       if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider)) return;
       const message = event.message as { role?: string; stopReason?: string };
@@ -98,6 +116,7 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
 
     pi.registerCommand("quota", {
       description: "List or manage CLIProxyAPI session quotas",
+      getArgumentCompletions: quotaCompletions,
       handler: async (rawArgs, ctx) => {
         try {
           const args = splitArguments(rawArgs);

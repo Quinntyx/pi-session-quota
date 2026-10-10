@@ -20,6 +20,7 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 - For supported model requests, `X-CLIProxyAPI-Session` is set to the exact tmux session name. The name is queried from `TMUX_PANE` for every request, so new windows and user renames are reflected.
 - Outside tmux, attribution is omitted and CLIProxyAPI uses its interactive (`""`) bucket.
 - Only `provisioned_quota_exhausted` is intercepted. `weekly_quota_exhausted` remains terminal.
+- Provisioned failures display “Reached provisioned quota cap, waiting for reset” instead of Codex's generic usage-limit error. An animated waiting widget shows available points versus the next request's required reservation; weekly and unrelated errors keep their original text.
 - Waiting is asynchronous and abort-aware. The TUI remains responsive to Escape, commands, and steering. Status is polled at most every 30 seconds and successful quota commands wake the poll immediately.
 - Before a retry, the failed assistant entry is omitted from model context with Pi's append-only `context_edit` boundary mechanism. Pi then rebuilds the request from current session context and consumes steering queued during the wait. HTTP request bytes are never replayed.
 - The run does not settle while waiting. This keeps callers such as `pi-subagents` pending until a genuine completion, cancellation, or terminal weekly quota error.
@@ -33,6 +34,8 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 /quota clear-all
 /quota skim [points|percent%]
 ```
+
+Subcommands support Tab completion (including the `status` alias). `/quota list` uses a Unicode box-drawing table with terminal-width-aware column alignment.
 
 `/quota skim` defaults to 10 points. The `%` suffix always means absolute quota points: `20%` means 20 points, `250%` means 250 points. It never means a fraction of another value.
 

@@ -95,7 +95,12 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
       const errors: string[] = [];
       session.bindExtensions({onError:(error:any)=>errors.push(String(error.message ?? error))});
       const settled: any[] = [];
-      session.subscribe((event:any)=>{if(event.type==="agent_settled") settled.push(event);});
+      const displayedErrors: string[] = [];
+      session.subscribe((event:any)=>{
+        if(event.type==="agent_settled") settled.push(event);
+        if(event.type==="message_end" && event.message.role==="assistant" && event.message.stopReason==="error")
+          displayedErrors.push(event.message.errorMessage);
+      });
       t.signal.addEventListener("abort", () => { void session.abort(); }, {once:true});
       let resolved = false;
       const run = session.prompt("Do the workflow").then(()=>{resolved=true;});
@@ -104,6 +109,7 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
       assert.equal(settled.length,0,"waiting must never settle");
       assert.equal(resolved,false,"parent Future must remain pending");
       assert.equal(session.isStreaming,true,"UI must retain an active run");
+      assert.match(displayedErrors[0],/Reached provisioned quota cap, waiting for reset/,"the actual displayed failure must distinguish pending quota waits");
       assert.deepEqual(errors,[],"quota hooks must not throw");
       if (outcome === "abort") {
         await session.abort();

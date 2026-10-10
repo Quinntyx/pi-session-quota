@@ -21,6 +21,7 @@ const quotaStatus = {
 function harness(fetchImpl: typeof fetch, resolveSession: () => Promise<string | null>) {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
   let command: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+  let complete: ((prefix: string) => unknown) | undefined;
   const pi = {
     on(name: string, handler: (event: any, ctx: any) => any) {
       const list = handlers.get(name) ?? [];
@@ -28,13 +29,14 @@ function harness(fetchImpl: typeof fetch, resolveSession: () => Promise<string |
       handlers.set(name, list);
       return () => undefined;
     },
-    registerCommand(name: string, options: { handler: typeof command }) {
+    registerCommand(name: string, options: { handler: typeof command; getArgumentCompletions?: typeof complete }) {
       assert.equal(name, "quota");
       command = options.handler;
+      complete = options.getArgumentCompletions;
     },
   } as unknown as ExtensionAPI;
   createExtension({ fetch: fetchImpl, resolveSession })(pi);
-  return { handlers, get command() { return command!; } };
+  return { handlers, get command() { return command!; }, get complete() { return complete!; } };
 }
 
 function context(notifications: Array<[string, string | undefined]> = []): ExtensionContext {
@@ -192,4 +194,45 @@ test("skim defaults to ten points and reports the actual transfer", async () => 
   await h.command("skim", context(notifications) as ExtensionCommandContext);
   assert.equal(requests[0].body, JSON.stringify({ amount: 10 }));
   assert.match(notifications[0][0], /Skimmed 3 quota points/);
+});
+
+
+test("quota command registers subcommand autocomplete and renders its list as a box table", async () => {
+  const notices: Array<[string, string | undefined]> = [];
+  const extension = harness(async () => response(quotaStatus), async () => "renamed-two");
+  assert.deepEqual(extension.complete("sk"), [{ value: "skim", label: "skim", description: "Free interactive quota: [points], default 10" }]);
+  assert.equal(extension.complete("set 10 "), null);
+  await extension.command("list", context(notices) as ExtensionCommandContext);
+  assert.match(notices[0][0], /┌.*┐/u);
+  assert.match(notices[0][0], /│ renamed-two │/u);
+});
+
+test("provisioned error gets informative display text without losing retry metadata", async () => {
+  const extension = harness(async () => response(quotaStatus), async () => "renamed-two");
+  const ctx = context();
+  await extension.handlers.get("after_provider_response")![0]({ status: 429, headers: {
+    "X-CLIProxyAPI-Quota-Code": "provisioned_quota_exhausted",
+    "X-CLIProxyAPI-Quota-Required-Points": "0.5",
+  } }, ctx);
+  const friendly = { ...assistantError, errorMessage: "You have hit your ChatGPT usage limit." };
+  const replacement = await extension.handlers.get("message_end")![0]({ type: "message_end", message: friendly }, ctx);
+  assert.match(replacement.message.errorMessage, /Reached provisioned quota cap, waiting for reset/);
+  assert.match(replacement.message.errorMessage, /not a terminal error/);
+  const result = await extension.handlers.get("turn_end")![0]({
+    type: "turn_end", message: replacement.message, messageEntryId: "replaced-error",
+  }, ctx);
+  assert.equal(result.continue, true);
+  assert.deepEqual(result.entries, [{ type: "context_edit", targetId: "replaced-error", replacement: null }]);
+});
+
+test("structured provisioned errors also get explanatory text; weekly and normal failures are unchanged", async () => {
+  const extension = harness(async () => response(quotaStatus), async () => "renamed-two");
+  const ctx = context();
+  const hook = extension.handlers.get("message_end")![0];
+  const replaced = await hook({ type: "message_end", message: assistantError }, ctx);
+  assert.match(replaced.message.errorMessage, /Workflow remains active/);
+  await extension.handlers.get("turn_start")![0]({}, ctx);
+  for (const errorMessage of ['{"error":{"code":"weekly_quota_exhausted"}}', "You have hit your ChatGPT usage limit.", "Connection refused"]) {
+    assert.equal(await hook({ type: "message_end", message: { ...assistantError, errorMessage } }, ctx), undefined);
+  }
 });

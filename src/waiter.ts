@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { QuotaClient } from "./quota-client.js";
+import { formatPoints } from "./points.js";
 import type { QuotaStatus } from "./types.js";
 
 export type WaitResult = "retry" | "aborted";
@@ -56,18 +57,28 @@ export class QuotaWaiter {
     const label = session || "interactive";
     let nextPollAt = Date.now();
     let lastError: string | undefined;
+    let availablePoints: number | undefined;
+    let frame = 0;
+    const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     const updateUi = () => {
       const seconds = Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1_000));
       const suffix = lastError ? `; status unavailable (${lastError})` : `; recheck in ${seconds}s`;
+      const budget = availablePoints === undefined ? "" : `Available: ${formatPoints(availablePoints)} points`;
+      const needed = requiredPoints > 0 ? `; next request needs ${formatPoints(requiredPoints)} points` : "";
       ctx.ui.setStatus("session-quota", `quota waiting: ${label}${suffix}`);
       ctx.ui.setWidget(
         "session-quota",
-        [`Provisioned quota exhausted for ${label}. Pi is paused asynchronously${suffix}.`, "Escape cancels; commands and steering remain available."],
+        [
+          `${frames[frame++ % frames.length]} Reached provisioned quota cap, waiting for reset (${label}).`,
+          ...(budget ? [budget + needed + suffix] : [suffix.slice(2)]),
+          "Workflow remains active. Escape cancels; commands and steering remain available.",
+        ],
         { placement: "belowEditor" },
       );
-      ctx.ui.setWorkingMessage("Waiting for provisioned quota…");
+      ctx.ui.setWorkingMessage("Reached provisioned quota cap, waiting for reset…");
     };
-    const ticker = setInterval(updateUi, 1_000);
+    updateUi();
+    const ticker = setInterval(updateUi, 250);
 
     try {
       let suggestedDelay = initialRetryAfterSeconds;
@@ -84,6 +95,7 @@ export class QuotaWaiter {
 
         if (status) {
           const bucket = status.buckets.find((item) => item.session === session) ?? status.buckets.find((item) => item.session === "");
+            availablePoints = bucket?.available;
           if (status.all_weekly_exhausted || (bucket && bucket.available > 0 && bucket.available + 1e-9 >= requiredPoints)) return "retry";
           suggestedDelay = status.retry_after_seconds;
         }

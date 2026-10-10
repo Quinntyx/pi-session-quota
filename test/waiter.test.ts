@@ -78,3 +78,38 @@ test("unregistered sessions wait on interactive and require enough admission cre
   waiter.wake();
   assert.equal(await pending,"retry");
 });
+
+
+test("wait UI explains nonzero-but-insufficient quota and cleans up its spinner", async () => {
+  let requests = 0;
+  const fetchImpl: typeof fetch = async () => {
+    const available = ++requests > 1 ? 1 : 0.3;
+    return new Response(JSON.stringify({
+      capacity: 250, total_remaining: available, all_weekly_exhausted: false,
+      buckets: [{ session: "Mysticism", cap: 100, remaining: available, held: 0, available }],
+      retry_after_seconds: 3600,
+    }), { status: 200 });
+  };
+  const widgets: Array<string[] | undefined> = [];
+  const messages: Array<string | undefined> = [];
+  const context = ctx(new AbortController().signal);
+  context.ui.setWidget = (_key: string, value: any) => { widgets.push(value); };
+  context.ui.setWorkingMessage = (value?: string) => { messages.push(value); };
+  const waiter = new QuotaWaiter();
+  const client = new QuotaClient({ endpoint: "http://proxy/v1/session-quota", headers: {} }, fetchImpl);
+  const pending = waiter.waitUntilRetry(client, "Mysticism", context, 3600, 0.5);
+  try {
+    for (let n = 0; n < 20 && !widgets.some((lines) => lines?.join(" ").includes("Available: 0.3")); n++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    const lines = widgets.find((entry) => entry?.join(" ").includes("Available: 0.3"))!;
+    assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Reached provisioned quota cap/);
+    assert.match(lines.join(" "), /next request needs 0.5 points/);
+    assert.match(lines.join(" "), /Workflow remains active/);
+    assert.match(messages[0]!, /waiting for reset/);
+  } finally {
+    waiter.wake();
+    assert.equal(await pending, "retry");
+  }
+  assert.equal(widgets.at(-1), undefined);
+  assert.equal(messages.at(-1), undefined);
+});
