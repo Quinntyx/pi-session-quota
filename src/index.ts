@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext, TurnEndEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, TurnEndEvent } from "@earendil-works/pi-coding-agent";
+import { cacheHints } from "./cache-hints.js";
 import { splitArguments } from "./args.js";
 import { quotaCompletions } from "./completions.js";
 import { parseProvisionedQuotaError, type ProvisionedQuotaErrorInfo } from "./errors.js";
@@ -39,6 +40,7 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
       if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider)) return;
       const session = await getSession();
       if (session !== null) event.headers[SESSION_HEADER] = session;
+      Object.assign(event.headers, cacheHints(ctx.sessionManager?.getBranch?.() ?? [], ctx.model.provider, ctx.model.id));
     });
 
     const waitForQuota = async (
@@ -119,10 +121,10 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
       return { continue: true };
     });
 
-    pi.registerCommand("quota", {
+    const quotaCommand = {
       description: "List or manage CLIProxyAPI session quotas",
       getArgumentCompletions: quotaCompletions,
-      handler: async (rawArgs, ctx) => {
+      handler: async (rawArgs: string, ctx: ExtensionCommandContext) => {
         try {
           const args = splitArguments(rawArgs);
           const action = args.shift() ?? "list";
@@ -164,7 +166,7 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
           if (action === "skim") {
             if (args.length > 1) throw new Error("Usage: /quota skim [points|percent%]");
             const { points } = parsePoints(args[0] ?? "10");
-            const transferred = await client.skim(points, ctx.signal);
+            const transferred = await client.skim(points, ctx.signal, (await getSession()) ?? "");
             waiter.wake();
             ctx.ui.notify(`Skimmed ${formatPoints(transferred)} quota points`, "info");
             return;
@@ -175,6 +177,11 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         }
       },
+    };
+    pi.registerCommand("quota", quotaCommand);
+    pi.registerCommand("skim", {
+      description: "Transfer quota points into the current session (default: 10)",
+      handler: (args, ctx) => quotaCommand.handler(`skim ${args}`, ctx),
     });
   };
 }

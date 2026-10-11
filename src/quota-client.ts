@@ -97,11 +97,11 @@ export class QuotaClient {
     await this.request("/sessions", { method: "DELETE", signal });
   }
 
-  async skim(amount: number, signal?: AbortSignal): Promise<number> {
+  async skim(amount: number, signal?: AbortSignal, session = ""): Promise<number> {
     const body = await this.request("/skim", {
       method: "POST",
       signal,
-      body: JSON.stringify({ amount }),
+      body: JSON.stringify({ amount, session }),
     });
     const transferred = body && typeof body === "object" && "transferred" in body ? body.transferred : undefined;
     if (typeof transferred !== "number" || !Number.isFinite(transferred) || transferred < 0 || transferred > amount) {

@@ -20,7 +20,9 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 - For supported model requests, `X-CLIProxyAPI-Session` is set to the exact tmux session name. The name is queried from `TMUX_PANE` for every request, so new windows and user renames are reflected.
 - Outside tmux, attribution is omitted and CLIProxyAPI uses its interactive (`""`) bucket.
 - Only `provisioned_quota_exhausted` is intercepted. `weekly_quota_exhausted` remains terminal.
-- Provisioned failures display “Reached provisioned quota cap, waiting for reset” instead of Codex's generic usage-limit error. An animated waiting widget shows available points versus the next request's required reservation; weekly and unrelated errors keep their original text.
+- Provisioned failures display “Reached provisioned quota cap, waiting for reset” instead of Codex's generic usage-limit error. An animated waiting widget shows available points versus the last rejected reservation estimate; weekly and unrelated errors keep their original text.
+- Recent successful usage provides best-effort input and cache-prefix estimates. New messages/tool results and previous output are included; compaction, model changes, or edits to successful context discard the hint. A 10% cache-prefix safety margin is used. Full output allowances remain reserved, and actual upstream usage (including a cache miss) always replaces estimates. These are trusted-client estimates, not guaranteed cache hits or a security boundary.
+- Waiting never treats `required_points` from an old failure as permanent: with positive spendable balance, the proxy rechecks admission at least every 30 seconds. Zero balances stay paused; no bucket is borrowed from to admit a request.
 - Waiting is asynchronous and abort-aware. The TUI remains responsive to Escape, commands, and steering. Status is polled at most every 30 seconds and successful quota commands wake the poll immediately.
 - Before a retry, the failed assistant entry is omitted from model context with Pi's append-only `context_edit` boundary mechanism. Pi then rebuilds the request from current session context and consumes steering queued during the wait. HTTP request bytes are never replayed.
 - The run does not settle while waiting. This keeps callers such as `pi-subagents` pending until a genuine completion, cancellation, or terminal weekly quota error.
@@ -34,11 +36,12 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 /quota clear [session]
 /quota clear-all
 /quota skim [points|percent%]
+/skim [points|percent%]
 ```
 
 Subcommands support Tab completion (including the `status` alias). `/quota list` uses a Unicode box-drawing table with terminal-width-aware column alignment.
 
-`/quota skim` defaults to 10 points. The `%` suffix always means absolute quota points: `20%` means 20 points, `250%` means 250 points. It never means a fraction of another value.
+`/skim` and `/quota skim` default to 10 points and transfer into the current registered tmux session, or interactive when unregistered/outside tmux. Other funded buckets donate by assigned cap, including interactive when funding a registered session. Held reservations and caps are unchanged; dry-donor shortfalls are redistributed. An explicit skim can temporarily put a balance above its cap. The `%` suffix always means absolute quota points: `20%` means 20 points, `250%` means 250 points. It never means a fraction of another value.
 
 The default session for `set` and `clear` is the current tmux session. Without tmux, those cap commands require an explicit session. The unattributed interactive bucket is the remainder; `interactive` as an explicit session argument is a literal tmux session name. Quote tmux names containing whitespace.
 
@@ -50,7 +53,7 @@ All endpoints use the active model's API-key authentication (not the management 
 - `PUT /v1/session-quota/sessions/:encodedName` with `{ "cap": number }`
 - `DELETE /v1/session-quota/sessions/:encodedName`
 - `DELETE /v1/session-quota/sessions`
-- `POST /v1/session-quota/skim` with `{ "amount": number }`
+- `POST /v1/session-quota/skim` with `{ "amount": number, "session": "current tmux session" }` (session optional; unregistered/omitted targets interactive)
 
 Status payload:
 

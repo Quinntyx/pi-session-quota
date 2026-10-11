@@ -55,6 +55,7 @@ export class QuotaWaiter {
     requiredPoints = 0,
   ): Promise<WaitResult> {
     const label = session || "interactive";
+    const admissionRecheckAt = Date.now() + 30_000;
     let nextPollAt = Date.now();
     let lastError: string | undefined;
     let availablePoints: number | undefined;
@@ -64,7 +65,7 @@ export class QuotaWaiter {
       const seconds = Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1_000));
       const suffix = lastError ? `; status unavailable (${lastError})` : `; recheck in ${seconds}s`;
       const budget = availablePoints === undefined ? "" : `Available: ${formatPoints(availablePoints)} points`;
-      const needed = requiredPoints > 0 ? `; next request needs ${formatPoints(requiredPoints)} points` : "";
+      const needed = requiredPoints > 0 ? `; last reservation estimate: ${formatPoints(requiredPoints)} points` : "";
       ctx.ui.setStatus("session-quota", `quota waiting: ${label}${suffix}`);
       ctx.ui.setWidget(
         "session-quota",
@@ -95,8 +96,12 @@ export class QuotaWaiter {
 
         if (status) {
           const bucket = status.buckets.find((item) => item.session === session) ?? status.buckets.find((item) => item.session === "");
-            availablePoints = bucket?.available;
-          if (status.all_weekly_exhausted || (bucket && bucket.available > 0 && bucket.available + 1e-9 >= requiredPoints)) return "retry";
+          availablePoints = bucket?.available;
+          // Estimates can change with calibration, routing, cache hits, or steering.
+          // A fresh proxy admission remains atomic; periodically retry it rather
+          // than waiting forever for an obsolete threshold to become available.
+          if (status.all_weekly_exhausted || (bucket && bucket.available > 0 &&
+            (bucket.available + 1e-9 >= requiredPoints || Date.now() >= admissionRecheckAt))) return "retry";
           suggestedDelay = status.retry_after_seconds;
         }
 

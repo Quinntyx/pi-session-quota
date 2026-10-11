@@ -23,6 +23,7 @@ function harness(fetchImpl: typeof fetch, resolveSession: () => Promise<string |
   const emitted: Array<{ name: string; data: any }> = [];
   let command: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
   let complete: ((prefix: string) => unknown) | undefined;
+  const commands = new Map<string, typeof command>();
   const pi = {
     events: { emit(name: string, data: any) { emitted.push({ name, data }); } },
     on(name: string, handler: (event: any, ctx: any) => any) {
@@ -32,13 +33,15 @@ function harness(fetchImpl: typeof fetch, resolveSession: () => Promise<string |
       return () => undefined;
     },
     registerCommand(name: string, options: { handler: typeof command; getArgumentCompletions?: typeof complete }) {
-      assert.equal(name, "quota");
-      command = options.handler;
-      complete = options.getArgumentCompletions;
+      commands.set(name, options.handler);
+      if (name === "quota") {
+        command = options.handler;
+        complete = options.getArgumentCompletions;
+      }
     },
   } as unknown as ExtensionAPI;
   createExtension({ fetch: fetchImpl, resolveSession })(pi);
-  return { handlers, emitted, get command() { return command!; }, get complete() { return complete!; } };
+  return { handlers, emitted, commands, get command() { return command!; }, get complete() { return complete!; } };
 }
 
 function context(notifications: Array<[string, string | undefined]> = []): ExtensionContext {
@@ -194,7 +197,7 @@ test("skim defaults to ten points and reports the actual transfer", async () => 
     return new Response(JSON.stringify({ transferred: 3, quota: quotaStatus }), { status: 200 });
   }, async () => "renamed-two");
   await h.command("skim", context(notifications) as ExtensionCommandContext);
-  assert.equal(requests[0].body, JSON.stringify({ amount: 10 }));
+  assert.equal(requests[0].body, JSON.stringify({ amount: 10, session: "renamed-two" }));
   assert.match(notifications[0][0], /Skimmed 3 quota points/);
 });
 
@@ -202,7 +205,7 @@ test("skim defaults to ten points and reports the actual transfer", async () => 
 test("quota command registers subcommand autocomplete and renders its list as a box table", async () => {
   const notices: Array<[string, string | undefined]> = [];
   const extension = harness(async () => response(quotaStatus), async () => "renamed-two");
-  assert.deepEqual(extension.complete("sk"), [{ value: "skim", label: "skim", description: "Free interactive quota: [points], default 10" }]);
+  assert.deepEqual(extension.complete("sk"), [{ value: "skim", label: "skim", description: "Fund current quota: [points], default 10" }]);
   assert.equal(extension.complete("set 10 "), null);
   await extension.command("list", context(notices) as ExtensionCommandContext);
   assert.match(notices[0][0], /┌.*┐/u);
@@ -241,4 +244,35 @@ test("structured provisioned errors also get explanatory text; weekly and normal
   for (const errorMessage of ['{"error":{"code":"weekly_quota_exhausted"}}', "You have hit your ChatGPT usage limit.", "Connection refused"]) {
     assert.equal(await hook({ type: "message_end", message: { ...assistantError, errorMessage } }, ctx), undefined);
   }
+});
+
+
+test("/skim alias funds the current tmux session with default ten points",async()=>{
+ const requests:RequestInit[]=[];
+ const h=harness(async(_input,init={})=>{requests.push(init);return response({transferred:10,quota:quotaStatus});},async()=>"Mysticism");
+ await h.commands.get("skim")!("",context() as ExtensionCommandContext);
+ assert.deepEqual(JSON.parse(requests[0].body as string),{amount:10,session:"Mysticism"});
+});
+test("/skim outside tmux targets interactive",async()=>{
+ const requests:RequestInit[]=[];
+ const h=harness(async(_input,init={})=>{requests.push(init);return response({transferred:5,quota:quotaStatus});},async()=>null);
+ await h.commands.get("skim")!("5%",context() as ExtensionCommandContext);
+ assert.deepEqual(JSON.parse(requests[0].body as string),{amount:5,session:""});
+});
+
+
+test("admission hints use recent successful usage without forwarding a failed turn",async()=>{
+ const h=harness(async()=>response(quotaStatus),async()=>"Mysticism");
+ const ctx=context();
+ Object.assign(ctx,{sessionManager:{getBranch:()=>[
+  {type:"message",id:"ok",message:{role:"assistant",provider:"cliproxyapi",model:"test",stopReason:"toolUse",usage:{input:210,cacheRead:87680,output:1496}}},
+  {type:"message",message:{role:"assistant",stopReason:"error",errorMessage:localErrorMessage}},
+ ]}});
+ const event={provider:"cliproxyapi",headers:{}};
+ for (const handler of h.handlers.get("before_provider_headers") ?? []) await handler(event,ctx);
+ assert.deepEqual(event.headers,{
+  "X-CLIProxyAPI-Session":"Mysticism",
+  "X-CLIProxyAPI-Quota-Input-Tokens":"90410",
+  "X-CLIProxyAPI-Quota-Cached-Tokens":"78912",
+ });
 });

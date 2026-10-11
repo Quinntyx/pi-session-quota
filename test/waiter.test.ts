@@ -103,7 +103,7 @@ test("wait UI explains nonzero-but-insufficient quota and cleans up its spinner"
       await new Promise((resolve) => setTimeout(resolve, 5));
     const lines = widgets.find((entry) => entry?.join(" ").includes("Available: 0.3"))!;
     assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Reached provisioned quota cap/);
-    assert.match(lines.join(" "), /next request needs 0.5 points/);
+    assert.match(lines.join(" "), /last reservation estimate: 0.5 points/);
     assert.match(lines.join(" "), /Workflow remains active/);
     assert.match(messages[0]!, /waiting for reset/);
   } finally {
@@ -112,4 +112,23 @@ test("wait UI explains nonzero-but-insufficient quota and cleans up its spinner"
   }
   assert.equal(widgets.at(-1), undefined);
   assert.equal(messages.at(-1), undefined);
+});
+
+
+test("positive quota periodically retries admission despite an obsolete estimate", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 0 });
+  const waiter = new QuotaWaiter();
+  const controller = new AbortController();
+  const client = new QuotaClient({ endpoint: "http://proxy/v1/session-quota", headers: {} }, async () =>
+    new Response(JSON.stringify({capacity:250,total_remaining:3,all_weekly_exhausted:false,
+      buckets:[{session:"work",cap:100,remaining:3,held:0,available:3}],retry_after_seconds:9000})));
+  let settled = false;
+  const pending = waiter.waitUntilRetry(client,"work",ctx(controller.signal),9000,40).then(result => { settled=true;return result; });
+  try {
+    await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(settled,false,"must not immediately spin on insufficient credit");
+    t.mock.timers.tick(30000);
+    waiter.wake();
+    assert.equal(await pending,"retry","fresh proxy admission must replace the stale 40-point estimate");
+  } finally { controller.abort(); }
 });

@@ -33,6 +33,6 @@ test("quota client uses encoded names, model auth, and documented bodies", async
   assert.equal((requests[0].init.headers as Record<string, string>).authorization, "Bearer model-key");
   assert.equal(requests[1].init.method, "DELETE");
   assert.equal(requests[2].url, "https://proxy.example/v1/session-quota/sessions");
-  assert.equal(requests[3].init.body, JSON.stringify({ amount: 10 }));
+  assert.equal(requests[3].init.body, JSON.stringify({ amount: 10, session: "" }));
   assert.equal(requests[4].init.method, undefined);
 });

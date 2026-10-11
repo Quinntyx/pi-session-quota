@@ -6,7 +6,7 @@ const SUBCOMMANDS = [
   { value: "set", label: "set", description: "Set a cap: <points> [session]" },
   { value: "clear", label: "clear", description: "Clear a cap: [session]" },
   { value: "clear-all", label: "clear-all", description: "Clear every session cap" },
-  { value: "skim", label: "skim", description: "Free interactive quota: [points], default 10" },
+  { value: "skim", label: "skim", description: "Fund current quota: [points], default 10" },
 ] satisfies AutocompleteItem[];
 
 export function quotaCompletions(argumentPrefix: string): AutocompleteItem[] | null {
