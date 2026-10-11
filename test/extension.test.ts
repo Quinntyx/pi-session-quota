@@ -247,16 +247,18 @@ test("structured provisioned errors also get explanatory text; weekly and normal
 });
 
 
-test("/skim alias funds the current tmux session with default ten points",async()=>{
+test("/quota skim funds the current tmux session with default ten points and has no standalone alias",async()=>{
  const requests:RequestInit[]=[];
  const h=harness(async(_input,init={})=>{requests.push(init);return response({transferred:10,quota:quotaStatus});},async()=>"Mysticism");
- await h.commands.get("skim")!("",context() as ExtensionCommandContext);
+ assert.equal(h.commands.has("skim"),false);
+ await h.command("skim",context() as ExtensionCommandContext);
  assert.deepEqual(JSON.parse(requests[0].body as string),{amount:10,session:"Mysticism"});
 });
-test("/skim outside tmux targets interactive",async()=>{
+test("/quota skim outside tmux targets interactive",async()=>{
  const requests:RequestInit[]=[];
  const h=harness(async(_input,init={})=>{requests.push(init);return response({transferred:5,quota:quotaStatus});},async()=>null);
- await h.commands.get("skim")!("5%",context() as ExtensionCommandContext);
+ assert.equal(h.commands.has("skim"),false);
+ await h.command("skim 5%",context() as ExtensionCommandContext);
  assert.deepEqual(JSON.parse(requests[0].body as string),{amount:5,session:""});
 });
 

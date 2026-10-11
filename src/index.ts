@@ -179,10 +179,6 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
       },
     };
     pi.registerCommand("quota", quotaCommand);
-    pi.registerCommand("skim", {
-      description: "Transfer quota points into the current session (default: 10)",
-      handler: (args, ctx) => quotaCommand.handler(`skim ${args}`, ctx),
-    });
   };
 }
 

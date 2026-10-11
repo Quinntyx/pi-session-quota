@@ -36,12 +36,11 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 /quota clear [session]
 /quota clear-all
 /quota skim [points|percent%]
-/skim [points|percent%]
 ```
 
 Subcommands support Tab completion (including the `status` alias). `/quota list` uses a Unicode box-drawing table with terminal-width-aware column alignment.
 
-`/skim` and `/quota skim` default to 10 points and transfer into the current registered tmux session, or interactive when unregistered/outside tmux. Other funded buckets donate by assigned cap, including interactive when funding a registered session. Held reservations and caps are unchanged; dry-donor shortfalls are redistributed. An explicit skim can temporarily put a balance above its cap. The `%` suffix always means absolute quota points: `20%` means 20 points, `250%` means 250 points. It never means a fraction of another value.
+`/quota skim` defaults to 10 points and transfers into the current registered tmux session, or interactive when unregistered/outside tmux. Other funded buckets donate by assigned cap, including interactive when funding a registered session. Held reservations and caps are unchanged; dry-donor shortfalls are redistributed. An explicit skim can temporarily put a balance above its cap. The `%` suffix always means absolute quota points: `20%` means 20 points, `250%` means 250 points. It never means a fraction of another value.
 
 The default session for `set` and `clear` is the current tmux session. Without tmux, those cap commands require an explicit session. The unattributed interactive bucket is the remainder; `interactive` as an explicit session argument is a literal tmux session name. Quote tmux names containing whitespace.
 
