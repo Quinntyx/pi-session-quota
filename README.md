@@ -22,10 +22,11 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 - Only `provisioned_quota_exhausted` is intercepted. `weekly_quota_exhausted` remains terminal.
 - Provisioned failures display “Reached provisioned quota cap, waiting for reset” instead of Codex's generic usage-limit error. An animated waiting widget shows available points versus the last rejected reservation estimate; weekly and unrelated errors keep their original text.
 - Recent successful usage provides best-effort input and cache-prefix estimates. New messages/tool results and previous output are included; compaction, model changes, or edits to successful context discard the hint. A 10% cache-prefix safety margin is used. Full output allowances remain reserved, and actual upstream usage (including a cache miss) always replaces estimates. These are trusted-client estimates, not guaranteed cache hits or a security boundary.
-- Waiting never treats `required_points` from an old failure as permanent: with positive spendable balance, the proxy rechecks admission at least every 30 seconds. Zero balances stay paused; no bucket is borrowed from to admit a request.
+- Normal deficits remain pending across refills and repeated admission failures: `required_points > available` is not proof of an impossible request, including when credit is held. With positive spendable balance, stale estimates are rechecked through a rebuilt request after at most 30 seconds. Apparently affordable but repeatedly rejected requests have a cancelable one-second retry delay rather than a tight loop.
+- An estimate above the provisioned cap (and any currently spendable over-cap grant) gets one immediate live-context/projection-aware rebuild, even at zero balance. Only a still-impossible rebuilt estimate stops; lowered estimates or raised caps return to normal pending refill waits. Status outages remain abort-aware waits, not evidence of insufficient capacity.
 - Waiting is asynchronous and abort-aware. The TUI remains responsive to Escape, commands, and steering. Status is polled at most every 30 seconds and successful quota commands wake the poll immediately.
-- Before a retry, the failed assistant entry is omitted from model context with Pi's append-only `context_edit` boundary mechanism. Pi then rebuilds the request from current session context and consumes steering queued during the wait. HTTP request bytes are never replayed.
-- The run does not settle while waiting. This keeps callers such as `pi-subagents` pending until a genuine completion, cancellation, or terminal weekly quota error.
+- Before a retry, the failed assistant entry is omitted from model context with Pi's append-only `context_edit` boundary mechanism. Pi then rebuilds the request from current session context, reruns context projections, and consumes steering queued during the wait. HTTP request bytes are never replayed.
+- The run does not settle while waiting. This keeps callers such as `pi-subagents` pending until a genuine completion, cancellation, terminal weekly quota error, or a rebuilt request proven unable to fit provisioned capacity.
 - Quota waits also publish `session-quota:wait-state` through Pi's extension bus. Updated `pi-sock` exposes a cumulative `quotaWait` pause clock so updated `pi-subagents` can suspend execution/root deadlines instead of timing out a still-pending run. These orchestration components must be updated together; suppressing settlement alone cannot prevent an older caller's wall-clock timeout.
 
 ## Commands
@@ -74,9 +75,11 @@ Status payload:
 }
 ```
 
-The local admission failure contains error code and type `provisioned_quota_exhausted`, with `retry_after_seconds` and optional `required_points` (the admission estimate), so tiny positive balances do not cause repeated rejected requests. A weekly failure uses `weekly_quota_exhausted` and is not caught.
+The refillable local admission failure is HTTP 429 with error code and type `provisioned_quota_exhausted`, `retry_after_seconds`, and optional `required_points` (the admission estimate). A weekly failure uses `weekly_quota_exhausted` and is not caught.
 
-Because the native Codex client replaces HTTP 429 bodies with a generic ChatGPT limit message, the proxy also supplies `X-CLIProxyAPI-Quota-Code`, `X-CLIProxyAPI-Quota-Retry-After`, and `X-CLIProxyAPI-Quota-Required-Points`. The extension uses the response hook to retain this metadata, without treating unrelated upstream 429 errors as provisioned-quota waits. Error bodies include a `quota exceeded` reason so native Codex leaves retry scheduling to this extension instead of doing its own HTTP backoff.
+The proxy's bounded request-size failure is distinct: HTTP 413, `error.code: context_too_large`, `error.type: invalid_request_error`, `retryable: false`, `required_points`, and `max_points`; its quota header identifies `request_too_large`. It is not a provisioned refill wait. Genuine provider context-overflow errors retain Pi's native compaction/recovery lifecycle; quota handling does not disable compaction or reconstruct raw durable history over the live projected context.
+
+Because the native Codex client replaces HTTP 429 bodies with a generic ChatGPT limit message, the proxy also supplies `X-CLIProxyAPI-Quota-Code`, `X-CLIProxyAPI-Quota-Retry-After`, and `X-CLIProxyAPI-Quota-Required-Points`. The extension uses the response hook only while an assistant turn is awaiting its provider response, so typed failures from compaction model calls cannot leak into the agent lifecycle. Untyped upstream 429 errors remain native terminal/retry-policy errors. Error bodies include a `quota exceeded` reason so native Codex leaves retry scheduling to this extension instead of doing its own HTTP backoff.
 
 ## Development
 
@@ -93,7 +96,7 @@ The repository itself has no runtime dependencies beyond Pi and Node.js.
 PI_QUOTA_TEST_SDK=/absolute/path/to/pi-coding-agent/dist/index.js npm test
 ```
 
-This exercises real Pi sessions using both OpenAI Chat Completions and native Codex Responses against a local fake proxy: the run and its Future stay pending with zero `agent_settled` events during quota waits; queued steering is applied to the rebuilt request; cancellation and weekly exhaustion settle exactly once. Without the environment variable these machine-specific tests are skipped.
+This exercises installed Pi 1.1.0 sessions using both OpenAI Chat Completions and native Codex Responses against a local fake proxy: zero `agent_settled` events while pending; repeated refillable deficits with held credit; bounded 296-point estimates at zero/positive balance; projection-aware retries that become refillable; raised capacity; status-outage cancellation; canceled threshold compaction; genuine native overflow recovery; compaction-response metadata isolation; distinct typed request-size and untyped upstream failures. Sent bodies are checked for fresh transformations and steering, not raw-history replay. Cancellation and weekly exhaustion settle exactly once. Without the SDK environment variable these machine-specific tests are skipped; skipped cases are not validation. Run `npm run check` with the same environment for typechecking and the full suite.
 
 To also exercise actual Python sync/async socket waiters beyond a deliberately
 short execution deadline, set the following alongside `PI_QUOTA_TEST_SDK`:

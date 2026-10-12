@@ -23,6 +23,9 @@ export function parseProvisionedQuotaError(value: unknown): ProvisionedQuotaErro
   const combined = strings.join("\n");
   if (!combined.includes(PROVISIONED_QUOTA_CODE)) return null;
 
+  const required = combined.match(/["']required_points["']\s*:\s*(\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i);
+  const requiredPoints = required ? Number(required[1]) : undefined;
+  const info: ProvisionedQuotaErrorInfo = Number.isFinite(requiredPoints) && requiredPoints! > 0 ? { requiredPoints } : {};
   const retryPatterns = [
     /["']retry_after_seconds["']\s*:\s*(\d+(?:\.\d+)?)/i,
     /retry[_ -]?after(?:[_ -]?seconds)?[^0-9]*(\d+(?:\.\d+)?)/i,
@@ -30,11 +33,11 @@ export function parseProvisionedQuotaError(value: unknown): ProvisionedQuotaErro
   for (const pattern of retryPatterns) {
     const match = combined.match(pattern);
     if (match) {
-      const required = combined.match(/["']required_points["']\s*:\s*(\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i);
-      return { retryAfterSeconds: Number(match[1]), ...(required ? {requiredPoints: Number(required[1])} : {}) };
+      const retryAfterSeconds = Number(match[1]);
+      return Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? { ...info, retryAfterSeconds } : info;
     }
   }
-  return {};
+  return info;
 }
 
 export function quotaCodeFromBody(value: unknown): string | undefined {

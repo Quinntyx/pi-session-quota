@@ -9,7 +9,7 @@ import type { FetchLike } from "./quota-client.js";
 import { isCliProxyApiProvider, quotaClientForContext } from "./target.js";
 import { resolveTmuxSession } from "./tmux.js";
 import { SESSION_HEADER } from "./types.js";
-import { QuotaWaiter } from "./waiter.js";
+import { QuotaWaiter, type WaitResult } from "./waiter.js";
 
 export interface ExtensionDependencies {
   fetch?: FetchLike;
@@ -47,12 +47,14 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
       ctx: ExtensionContext,
       retryAfterSeconds: number | undefined,
       requiredPoints?: number,
-    ): Promise<"retry" | "aborted"> => {
+      allowRebuild = true,
+      minimumRetryDelayMs = 0,
+    ): Promise<WaitResult> => {
       const client = await quotaClientForContext(ctx, fetchImpl);
       const session = (await getSession()) ?? "";
       pi.events.emit("session-quota:wait-state", { active: true, reason: "provisioned_quota_exhausted" });
       try {
-        return await waiter.waitUntilRetry(client, session, ctx, retryAfterSeconds, requiredPoints);
+        return await waiter.waitUntilRetry(client, session, ctx, retryAfterSeconds, requiredPoints, allowRebuild, minimumRetryDelayMs);
       } finally {
         pi.events.emit("session-quota:wait-state", { active: false, reason: "provisioned_quota_exhausted" });
       }
@@ -60,12 +62,35 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
 
     let resumeProvisioned = false;
     let responseQuota: ProvisionedQuotaErrorInfo | null = null;
+    let awaitingAssistantResponse = false;
+    let rebuiltImpossibleEstimate = false;
+    let hasRetriedProvisioned = false;
+    let preparedWaitResult: WaitResult | undefined;
+    const unfulfillableMessage = "Provisioned quota cannot fit the rebuilt request's reservation estimate. Workflow stopped to avoid an automatic retry loop; increase the provisioned cap or reduce context/output limits before submitting again.";
 
-    pi.on("turn_start", () => { responseQuota = null; });
+    // before_agent_start belongs to a user-submitted prompt. Pi 1.1.0 emits a
+    // new agent_start for agent.continue(), which must not reset the rebuild
+    // guard. Normal refill waits have no retry-count limit.
+    pi.on("before_agent_start", () => {
+      resumeProvisioned = false;
+      responseQuota = null;
+      awaitingAssistantResponse = false;
+      rebuiltImpossibleEstimate = false;
+      hasRetriedProvisioned = false;
+      preparedWaitResult = undefined;
+    });
+
+    pi.on("turn_start", () => {
+      responseQuota = null;
+      preparedWaitResult = undefined;
+      awaitingAssistantResponse = true;
+    });
     pi.on("after_provider_response", (event, ctx) => {
-      if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider)) return;
+      if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider) || !awaitingAssistantResponse) return;
       // Native Codex intentionally replaces all 429 bodies with a friendly
       // upstream-limit message. Headers retain our admission failure identity.
+      // Restrict this metadata to the active assistant request: compaction and
+      // other streamSimple calls share provider hooks but have no turn_start.
       const headers = new Headers(event.headers);
       responseQuota = null;
       if (event.status !== 429 || headers.get("x-cliproxyapi-quota-code") !== "provisioned_quota_exhausted") return;
@@ -77,21 +102,31 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
       };
     });
 
-    pi.on("message_end", (event, ctx) => {
+    pi.on("message_end", async (event, ctx) => {
       if (!ctx.model || !isCliProxyApiProvider(ctx.model.provider)) return;
       const message = event.message;
-      if (message.role !== "assistant" || message.stopReason !== "error") return;
+      if (message.role !== "assistant") return;
+      awaitingAssistantResponse = false;
+      if (message.stopReason !== "error") {
+        responseQuota = null;
+        rebuiltImpossibleEstimate = false;
+        hasRetriedProvisioned = false;
+        return;
+      }
       const info = assistantQuotaError(message) ?? responseQuota;
       if (!info) return;
       // Keep the admission metadata for turn_end after replacing Codex's
       // misleading generic 429 text in the finalized, displayed message.
       responseQuota = info;
-      return {
-        message: {
-          ...message,
-          errorMessage: "Reached provisioned quota cap, waiting for reset. Workflow remains active; this is not a terminal error.",
-        },
-      };
+      // Recheck capacity through the same abort-aware, clock-scoped waiter. Do
+      // this before finalizing a rebuilt impossible failure, so terminal text is
+      // honest even if the status endpoint initially fails or the cap changes.
+      if (rebuiltImpossibleEstimate) {
+        preparedWaitResult = await waitForQuota(ctx, info.retryAfterSeconds, info.requiredPoints, false, 1_000);
+      }
+      const errorMessage = preparedWaitResult === "unfulfillable" ? unfulfillableMessage
+        : "Reached provisioned quota cap, waiting for reset. Workflow remains active; this is not a terminal error.";
+      return { message: { ...message, errorMessage } };
     });
 
     pi.on("turn_end", async (event: TurnEndEvent, ctx) => {
@@ -101,9 +136,13 @@ export function createExtension(dependencies: ExtensionDependencies = {}) {
         (message.role === "assistant" && message.stopReason === "error" ? responseQuota : null);
       responseQuota = null;
       if (!info) { resumeProvisioned = false; return; }
-
-      const result = await waitForQuota(ctx, info.retryAfterSeconds, info.requiredPoints);
-      if (result !== "retry") return;
+      resumeProvisioned = false;
+      const result = preparedWaitResult ?? await waitForQuota(ctx, info.retryAfterSeconds, info.requiredPoints,
+        !rebuiltImpossibleEstimate, hasRetriedProvisioned ? 1_000 : 0);
+      preparedWaitResult = undefined;
+      if (result !== "retry" && result !== "rebuild") return;
+      if (result === "rebuild") rebuiltImpossibleEstimate = true;
+      hasRetriedProvisioned = true;
       resumeProvisioned = true;
 
       return {

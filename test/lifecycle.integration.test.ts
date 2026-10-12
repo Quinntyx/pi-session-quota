@@ -71,9 +71,10 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
       requests.push({header:req.headers["x-cliproxyapi-session"] as string|undefined,body:JSON.parse(body)});
       if (available === 0 || weekly) {
         const code = weekly ? "weekly_quota_exhausted" : "provisioned_quota_exhausted";
+        const requiredPoints = 0.5;
         res.writeHead(429,{"content-type":"application/json","retry-after":"0",
-          "x-cliproxyapi-quota-code":code,"x-cliproxyapi-quota-retry-after":"60","x-cliproxyapi-quota-required-points":"0.5"});
-        res.end(JSON.stringify({error:{code,type:code,reason:"quota exceeded",message:weekly?"Weekly quota exhausted":"Out of provisioned quota",retry_after_seconds:60,required_points:0.5}}));
+          "x-cliproxyapi-quota-code":code,"x-cliproxyapi-quota-retry-after":"60","x-cliproxyapi-quota-required-points":String(requiredPoints)});
+        res.end(JSON.stringify({error:{code,type:code,reason:"quota exceeded",message:weekly?"Weekly quota exhausted":"Out of provisioned quota",retry_after_seconds:60,required_points:requiredPoints}}));
         return;
       }
       res.writeHead(200,{"content-type":"text/event-stream"});
@@ -104,8 +105,22 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
     const baseUrl = `http://127.0.0.1:${address.port}/v1`;
     await writeFile(join(directory,"models.json"),JSON.stringify({providers:{cliproxyapi:{baseUrl,api,apiKey:api === "openai-codex-responses" ? `e30.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:"test"}})).toString("base64url")}.test` : "test",models:[{id:"quota-test",name:"Quota test",reasoning:false,input:["text"],contextWindow:10000,maxTokens:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}));
     const waiter = new QuotaWaiter();
-    const settingsManager = sdk.SettingsManager.inMemory({transport:"sse",retry:{enabled:false},compaction:{enabled:false},cacheWarming:{enabled:false}});
-    const factories = [{factory:createExtension({resolveSession:async()=>"workflow",waiter}),source:"quota-test"}];
+    const settingsManager = sdk.SettingsManager.inMemory({transport:"sse",retry:{enabled:false},compaction:{enabled:true},cacheWarming:{enabled:false}});
+    let contextProjectionCalls = 0;
+    const projectionFactory = (pi: any) => pi.on("context", (event: any) => {
+      contextProjectionCalls++;
+      return {messages:event.messages.map((message:any)=>{
+        if(message.role!=="user") return message;
+        const content=Array.isArray(message.content)
+          ? message.content.map((part:any)=>part?.type==="text"?{...part,text:part.text.replaceAll("RAW_CONTEXT","PROJECTED_CONTEXT")}:part)
+          : message.content;
+        return {...message,content};
+      })};
+    });
+    const factories = [
+      {factory:createExtension({resolveSession:async()=>"workflow",waiter}),source:"quota-test"},
+      {factory:projectionFactory,source:"projection-test"},
+    ];
     if (crossProcess) factories.push({factory:(await import(pathToFileURL(sockExtension!).href)).default,source:"sock-test"});
     const loader = new sdk.DefaultResourceLoader({cwd:directory,agentDir:directory,settingsManager,
       noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,disabledBuiltinExtensions:["mcp"],
@@ -131,7 +146,7 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
       });
       t.signal.addEventListener("abort", () => { void session.abort(); }, {once:true});
       let resolved = false;
-      const run = session.prompt("Do the workflow").then(()=>{resolved=true;});
+      const run = session.prompt("Do the workflow with RAW_CONTEXT").then(()=>{resolved=true;});
       await eventually(()=>statusChecks>0,"quota wait begins");
       await delay(120);
       assert.equal(settled.length,0,"waiting must never settle");
@@ -185,8 +200,12 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
         assert.equal(requests.length,1);
       } else {
         assert.equal(requests.length,2,"retry must be a rebuilt request, not an opaque replay");
-        assert.ok(JSON.stringify(requests[1].body.messages ?? requests[1].body.input).includes("Apply this steering before retrying"));
-        assert.ok(!JSON.stringify(requests[1].body.messages ?? requests[1].body.input).includes("provisioned_quota_exhausted"));
+        const rebuiltContext = JSON.stringify(requests[1].body.messages ?? requests[1].body.input);
+        assert.ok(rebuiltContext.includes("Apply this steering before retrying"));
+        assert.ok(rebuiltContext.includes("PROJECTED_CONTEXT"),"the retry must use the live context projection");
+        assert.ok(!rebuiltContext.includes("RAW_CONTEXT"),"the retry cannot replay raw request bytes");
+        assert.ok(!rebuiltContext.includes("provisioned_quota_exhausted"));
+        assert.ok(contextProjectionCalls >= 2,"context projection must coexist across the initial request and retry");
         assert.equal(requests[0].header,"workflow");
         assert.equal(requests[1].header,"workflow");
         const last = session.messages.at(-1);

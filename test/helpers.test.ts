@@ -43,3 +43,11 @@ test("only the provisioned quota error code is recognized", () => {
   );
   assert.equal(parseProvisionedQuotaError('429 {"error":{"code":"weekly_quota_exhausted"}}'), null);
 });
+
+
+test("reservation estimates survive missing retry timing and reject non-finite values", () => {
+  assert.deepEqual(parseProvisionedQuotaError('429 {"error":{"code":"provisioned_quota_exhausted","required_points":296.585}}'),{requiredPoints:296.585});
+  assert.deepEqual(parseProvisionedQuotaError('429 {"error":{"code":"provisioned_quota_exhausted","retry_after_seconds":0,"required_points":4e1}}'),{requiredPoints:40});
+  assert.deepEqual(parseProvisionedQuotaError('429 {"error":{"code":"provisioned_quota_exhausted","required_points":1e999}}'),{});
+  assert.equal(parseProvisionedQuotaError('413 {"error":{"code":"context_too_large","required_points":296.585}}'),null);
+});

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { QuotaClient } from "../src/quota-client.js";
-import { QuotaWaiter } from "../src/waiter.js";
+import { estimateCannotFit, QuotaWaiter } from "../src/waiter.js";
 
 function ctx(signal: AbortSignal): ExtensionContext {
   return {
@@ -115,6 +115,18 @@ test("wait UI explains nonzero-but-insufficient quota and cleans up its spinner"
 });
 
 
+test("an estimate larger than the bucket allows one immediate rebuilt-context admission", async () => {
+  const waiter = new QuotaWaiter();
+  let requests = 0;
+  const client = new QuotaClient({ endpoint: "http://proxy/v1/session-quota", headers: {} }, async () => {
+    requests++;
+    return new Response(JSON.stringify({capacity:250,total_remaining:26.975,all_weekly_exhausted:false,
+      buckets:[{session:"work",cap:100,remaining:26.975,held:0,available:26.975}],retry_after_seconds:9000}));
+  });
+  assert.equal(await waiter.waitUntilRetry(client,"work",ctx(new AbortController().signal),9000,296.585),"rebuild");
+  assert.equal(requests,1);
+});
+
 test("positive quota periodically retries admission despite an obsolete estimate", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 0 });
   const waiter = new QuotaWaiter();
@@ -131,4 +143,48 @@ test("positive quota periodically retries admission despite an obsolete estimate
     waiter.wake();
     assert.equal(await pending,"retry","fresh proxy admission must replace the stale 40-point estimate");
   } finally { controller.abort(); }
+});
+
+
+test("unfulfillable classification uses provisioned cap, not today's deficit or held credit", () => {
+  const status = {capacity:250,total_remaining:26.975,all_weekly_exhausted:false,retry_after_seconds:60,
+    buckets:[{session:"work",cap:100,remaining:26.975,held:0,available:26.975}]};
+  assert.equal(estimateCannotFit(status,"work",40),false);
+  assert.equal(estimateCannotFit(status,"work",296.585),true);
+  status.buckets[0] = {session:"work",cap:100,remaining:400,held:375,available:25};
+  assert.equal(estimateCannotFit(status,"work",296.585),true,"held credit cannot admit an over-cap reservation");
+  status.buckets[0] = {session:"work",cap:100,remaining:400,held:0,available:400};
+  assert.equal(estimateCannotFit(status,"work",296.585),false,"an explicit over-cap spendable grant can fit");
+  status.buckets[0].session = "";
+  assert.equal(estimateCannotFit(status,"unregistered",40),false,"interactive fallback shares the cap rule");
+  assert.equal(estimateCannotFit({...status,buckets:[]},"work",296.585),false,"missing status is not proof of impossibility");
+});
+
+test("an already rebuilt impossible reservation stops even at zero available credit", async () => {
+  const client = new QuotaClient({endpoint:"http://proxy/v1/session-quota",headers:{}},async()=>
+    new Response(JSON.stringify({capacity:250,total_remaining:0,all_weekly_exhausted:false,retry_after_seconds:60,
+      buckets:[{session:"work",cap:100,remaining:0,held:0,available:0}]})));
+  assert.equal(await new QuotaWaiter().waitUntilRetry(client,"work",ctx(new AbortController().signal),60,296.585,false),"unfulfillable");
+});
+
+test("rejected rebuilt requests with apparently sufficient balance have a cancelable retry delay", async (t) => {
+  t.mock.timers.enable({apis:["Date"],now:0});
+  const controller = new AbortController();
+  const waiter = new QuotaWaiter();
+  let checks = 0;
+  const client = new QuotaClient({endpoint:"http://proxy/v1/session-quota",headers:{}},async()=> {
+    checks++;
+    return new Response(JSON.stringify({capacity:250,total_remaining:50,all_weekly_exhausted:false,retry_after_seconds:60,
+      buckets:[{session:"work",cap:100,remaining:50,held:0,available:50}]}));
+  });
+  let settled = false;
+  const pending = waiter.waitUntilRetry(client,"work",ctx(controller.signal),60,40,true,1_000).then(result=>{settled=true;return result;});
+  try {
+    await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(settled,false,"stale status cannot turn repeated native admission failures into a tight loop");
+    assert.equal(checks,1);
+    t.mock.timers.tick(1_000);
+    waiter.wake();
+    assert.equal(await pending,"retry");
+  } finally {controller.abort();}
 });

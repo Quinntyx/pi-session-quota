@@ -3,7 +3,13 @@ import { QuotaClient } from "./quota-client.js";
 import { formatPoints } from "./points.js";
 import type { QuotaStatus } from "./types.js";
 
-export type WaitResult = "retry" | "aborted";
+export type WaitResult = "retry" | "rebuild" | "unfulfillable" | "aborted";
+
+/** Refill restores cap, not today's balance. Over-cap spendable grants may fit too. */
+export function estimateCannotFit(status: QuotaStatus, session: string, requiredPoints = 0): boolean {
+  const bucket = status.buckets.find((item) => item.session === session) ?? status.buckets.find((item) => item.session === "");
+  return Boolean(bucket && requiredPoints > Math.max(bucket.cap, bucket.available) + 1e-9);
+}
 
 function abortError(): Error {
   const error = new Error("Quota wait aborted");
@@ -53,8 +59,11 @@ export class QuotaWaiter {
     ctx: ExtensionContext,
     initialRetryAfterSeconds?: number,
     requiredPoints = 0,
+    allowRebuild = true,
+    minimumRetryDelayMs = 0,
   ): Promise<WaitResult> {
     const label = session || "interactive";
+    const retryNotBefore = Date.now() + minimumRetryDelayMs;
     const admissionRecheckAt = Date.now() + 30_000;
     let nextPollAt = Date.now();
     let lastError: string | undefined;
@@ -97,12 +106,15 @@ export class QuotaWaiter {
         if (status) {
           const bucket = status.buckets.find((item) => item.session === session) ?? status.buckets.find((item) => item.session === "");
           availablePoints = bucket?.available;
-          // Estimates can change with calibration, routing, cache hits, or steering.
-          // A fresh proxy admission remains atomic; periodically retry it rather
-          // than waiting forever for an obsolete threshold to become available.
-          if (status.all_weekly_exhausted || (bucket && bucket.available > 0 &&
-            (bucket.available + 1e-9 >= requiredPoints || Date.now() >= admissionRecheckAt))) return "retry";
-          suggestedDelay = status.retry_after_seconds;
+          // A genuine weekly failure remains native. An impossible estimate gets
+          // one live-context rebuild, even at zero balance; a second impossible
+          // admission cannot be fixed by refill. Ordinary deficits remain pending.
+          if (status.all_weekly_exhausted) return "retry";
+          if (estimateCannotFit(status, session, requiredPoints)) return allowRebuild ? "rebuild" : "unfulfillable";
+          const ready = Boolean(bucket && bucket.available > 0 &&
+            (bucket.available + 1e-9 >= requiredPoints || Date.now() >= admissionRecheckAt));
+          if (ready && Date.now() >= retryNotBefore) return "retry";
+          suggestedDelay = ready ? (retryNotBefore - Date.now()) / 1_000 : status.retry_after_seconds;
         }
 
         const seconds = Number.isFinite(suggestedDelay) && (suggestedDelay ?? 0) > 0 ? suggestedDelay! : 5;
