@@ -20,7 +20,7 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 - For supported model requests, `X-CLIProxyAPI-Session` is set to the exact tmux session name. The name is queried from `TMUX_PANE` for every request, so new windows and user renames are reflected.
 - Outside tmux, attribution is omitted and CLIProxyAPI uses its interactive (`""`) bucket.
 - Only `provisioned_quota_exhausted` is intercepted. `weekly_quota_exhausted` remains terminal.
-- Provisioned failures display “Reached provisioned quota cap, waiting for reset” instead of Codex's generic usage-limit error. An animated waiting widget shows available points versus the last rejected reservation estimate; weekly and unrelated errors keep their original text.
+- Provisioned failures display “Reached provisioned quota cap, waiting for reset” instead of Codex's generic usage-limit error. An animated waiting widget shows available points and any session debt; weekly and unrelated errors keep their original text.
 - Recent successful usage provides best-effort input and cache-prefix estimates. New messages/tool results and previous output are included; compaction, model changes, or edits to successful context discard the hint. A 10% cache-prefix safety margin is used. Full output allowances remain reserved, and actual upstream usage (including a cache miss) always replaces estimates. These are trusted-client estimates, not guaranteed cache hits or a security boundary.
 - Normal deficits remain pending across refills and repeated admission failures: `required_points > available` is not proof of an impossible request, including when credit is held. With positive spendable balance, stale estimates are rechecked through a rebuilt request after at most 30 seconds. Apparently affordable but repeatedly rejected requests have a cancelable one-second retry delay rather than a tight loop.
 - An estimate above the provisioned cap (and any currently spendable over-cap grant) gets one immediate live-context/projection-aware rebuild, even at zero balance. Only a still-impossible rebuilt estimate stops; lowered estimates or raised caps return to normal pending refill waits. Status outages remain abort-aware waits, not evidence of insufficient capacity.
@@ -41,7 +41,7 @@ The package declares `src/index.ts` in `package.json` under `pi.extensions`; no 
 
 Subcommands support Tab completion (including the `status` alias). `/quota list` uses a Unicode box-drawing table with terminal-width-aware column alignment.
 
-`/quota skim` defaults to 10 points and transfers into the current registered tmux session, or interactive when unregistered/outside tmux. Other funded buckets donate by assigned cap, including interactive when funding a registered session. Held reservations and caps are unchanged; dry-donor shortfalls are redistributed. An explicit skim can temporarily put a balance above its cap. The `%` suffix always means absolute quota points: `20%` means 20 points, `250%` means 250 points. It never means a fraction of another value.
+`/quota skim` defaults to 10 points and transfers into the current registered tmux session, or interactive when unregistered/outside tmux. Other funded buckets donate by assigned cap, including interactive when funding a registered session. Caps are unchanged; only spendable credit is transferred, and dry-donor shortfalls are redistributed. An explicit skim can temporarily put a balance above its cap. The `%` suffix always means absolute quota points: `20%` means 20 points, `250%` means 250 points. It never means a fraction of another value.
 
 The default session for `set` and `clear` is the current tmux session. Without tmux, those cap commands require an explicit session. The unattributed interactive bucket is the remainder; `interactive` as an explicit session argument is a literal tmux session name. Quote tmux names containing whitespace.
 
@@ -113,3 +113,11 @@ pending beyond its timeout, and resume, weekly exhaustion, and explicit abort
 release the pause and settle exactly once. Python task/root budget regressions
 are also covered in `pi-subagents`. Existing notebook kernels retain imported
 Python code; restart/reset them before creating pools after an update.
+
+## Soft-cap admission
+
+Requests are no longer priced or rejected using context/cache/output estimates. A session with positive credit may start a request; reported token usage is converted to quota points afterwards and reconciled with upstream quota observations. This conversion remains approximate: subscription quota percentages are not a public token-price meter.
+
+The final request can cross the assigned cap. Its session owes the overrun against future refill; another session is not charged for that overrun. Near empty, the server allows only one in-flight request. `/quota list` shows debt and in-flight count instead of monetary reservations. Escape releases the in-flight slot promptly; missing final usage is not charged as a fabricated full reservation.
+
+During a genuine imminent-reset forced-account burn, the server may mark an empty/debt session ready so pending work can use that account. This exception ends when the forced account is no longer eligible. It does not bypass weekly exhaustion or account usage caps. Waiters honor server admission readiness and poll at most five seconds apart, while still supporting immediate wake from quota commands.

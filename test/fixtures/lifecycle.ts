@@ -61,6 +61,9 @@ export function succeed(res: ServerResponse, api: typeof apis[number], text = "c
 export async function lifecycle(api: typeof apis[number], options: {
   available?: number;
   held?: number;
+  admissionReady?: boolean;
+  inFlight?: number;
+  debt?: number;
   cap?: number;
   smallWindow?: boolean;
   compact?: "cancel" | "provide" | "native";
@@ -73,7 +76,7 @@ export async function lifecycle(api: typeof apis[number], options: {
   const sdk = await import(pathToFileURL(sdkPath).href);
   const directory = await mkdtemp(join(tmpdir(), "pi-session-quota-recovery-"));
   const waiter = new QuotaWaiter();
-  const state = {available:options.available ?? 0,held:options.held ?? 0,cap:options.cap ?? 100,statusChecks:0,commands:0,resolved:false};
+  const state = {available:options.available ?? 0,held:options.held ?? 0,cap:options.cap ?? 100,admissionReady:options.admissionReady,inFlight:options.inFlight ?? 0,debt:options.debt ?? 0,statusChecks:0,commands:0,resolved:false};
   const requests: Request[] = [];
   const settled: any[] = [];
   const compactions: any[] = [];
@@ -90,7 +93,7 @@ export async function lifecycle(api: typeof apis[number], options: {
       state.statusChecks++;
       res.writeHead(options.statusFailure?.() ? 503 : 200, {"content-type":"application/json"});
       res.end(JSON.stringify({capacity:250,total_remaining:state.available + state.held,all_weekly_exhausted:false,retry_after_seconds:60,
-        buckets:[{session:"workflow",cap:state.cap,remaining:state.available + state.held,held:state.held,available:state.available},
+        buckets:[{session:"workflow",cap:state.cap,remaining:state.available + state.held,held:state.held,available:state.available,admission_ready:state.admissionReady ?? state.available > 0,in_flight:state.inFlight,debt:state.debt},
           {session:"",cap:150,remaining:0,held:0,available:0}]}));
       return;
     }

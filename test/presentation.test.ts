@@ -8,8 +8,8 @@ import type { QuotaStatus } from "../src/types.js";
 const status: QuotaStatus = {
   capacity: 250, total_remaining: 12.749, all_weekly_exhausted: false,
   buckets: [
-    { session: "", cap: 150, remaining: 9.161, held: 4.052, available: 5.109 },
-    { session: "Mysticism", cap: 100, remaining: 3.588, held: 0, available: 3.588 },
+    { session: "", cap: 150, remaining: 9.161, held: 0, available: 9.161, in_flight: 2, debt: 0 },
+    { session: "Mysticism", cap: 100, remaining: 3.588, held: 0, available: 3.588, in_flight: 0, debt: 4.052 },
   ],
   retry_after_seconds: 1603,
 };
@@ -32,8 +32,8 @@ test("list renders a padded Unicode table with aligned numeric columns", () => {
   assert.ok(table[2].includes("┼"));
   assert.ok(table.at(-1)!.startsWith("└") && table.at(-1)!.endsWith("┘"));
   assert.equal(new Set(table.map(visibleWidth)).size, 1);
-  assert.match(output, /│ interactive │ 150 │     9\.161 │ 4\.052 │     5\.109 │/);
-  assert.match(output, /│ Mysticism   │ 100 │     3\.588 │     0 │     3\.588 │/);
+  assert.match(output, /│ interactive │ 150 │     9\.161 │     0 │         2 │     9\.161 │/);
+  assert.match(output, /│ Mysticism   │ 100 │     3\.588 │ 4\.052 │         0 │     3\.588 │/);
   assert.ok(!table.some((line) => line.includes("|")));
   assert.match(output, /Retry after: 1603s/);
 });

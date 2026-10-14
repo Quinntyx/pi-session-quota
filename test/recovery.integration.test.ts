@@ -3,135 +3,50 @@ import { test } from "node:test";
 import { apis, assertProjected, delay, eventually, fail, lifecycle, rawContext, sdkPath, sentContext, succeed } from "./fixtures/lifecycle.js";
 
 for (const api of apis) {
-  test(`real Pi recovery: ${api}: repeated ordinary deficits with held credit survive refill`, {skip:!sdkPath,timeout:20_000}, async () => {
-    let fixture: Awaited<ReturnType<typeof lifecycle>>;
-    fixture = await lifecycle(api,{available:10.33,held:14.29,handle:(res,index) => {
-      if(index <= 2) {
-        fixture.state.available = 10.33;
-        fail(res,"provisioned_quota_exhausted",40);
-      } else succeed(res,api);
-    }});
-    try {
-      const run = fixture.start();
-      for (const rejected of [1,2]) {
-        await eventually(()=>fixture.requests.length===rejected && fixture.pauses.filter(p=>p.active).length===rejected,"ordinary quota wait");
-        await delay(150);
-        assert.equal(fixture.settled.length,0,"a refillable deficit cannot settle the run");
-        assert.equal(fixture.state.resolved,false,"the caller must remain pending through repeated waits");
-        assert.equal(fixture.session.isStreaming,true);
-        assert.equal(fixture.requests.length,rejected,"10.33 available + 14.29 held / 100 cap / 40 needed is a wait, not an impossible reservation or tight loop");
-        assert.ok(fixture.widgets.some(lines=>lines?.[0]?.match(/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Reached provisioned quota cap/)),"the actual SDK UI binding retains an animated quota spinner");
-        await fixture.session.steer(`STEERING_${rejected}`);
-        fixture.state.available = 50;
-        await fixture.session.prompt("/quota set 100 workflow"); // Commands dispatch during an active wait.
-        assert.equal(fixture.state.commands,rejected);
-      }
-      await run;
-      assert.equal(fixture.requests.length,3);
-      assert.equal(fixture.settled.length,1);
-      assert.equal(fixture.pauses.at(-1)?.active,false,"settlement must release the pause clock");
-      assert.deepEqual(fixture.pauses.map(p=>p.active),[true,false,true,false]);
-      assert.deepEqual(fixture.errors,[]);
-      assert.equal(fixture.widgets.at(-1),undefined);
-      assert.equal(fixture.workingMessages.at(-1),undefined);
-      assert.equal(fixture.session.extensionRunner.getCommand("skim"),undefined,"standalone /skim must remain removed");
-      assertProjected(fixture.requests[0],1);
-      assertProjected(fixture.requests[1],2);
-      assertProjected(fixture.requests[2],3);
-      assert.ok(sentContext(fixture.requests[1]).includes("STEERING_1"));
-      assert.ok(sentContext(fixture.requests[2]).includes("STEERING_2"));
-      assert.ok(JSON.stringify(fixture.session.sessionManager.getEntries()).includes(rawContext),"projection must not rewrite durable user history");
+  test(`real Pi soft caps: ${api}: repeated empty-budget waits retain the workflow and steering`,{skip:!sdkPath,timeout:20000},async()=>{
+    let fixture:Awaited<ReturnType<typeof lifecycle>>;
+    fixture=await lifecycle(api,{handle:(res,index)=>{if(index<=2){fixture.state.available=0;fail(res,"provisioned_quota_exhausted",296.585);}else succeed(res,api);}});
+    try {const run=fixture.start();for(const rejected of [1,2]) {
+      await eventually(()=>fixture.requests.length===rejected && fixture.pauses.filter(p=>p.active).length===rejected,"empty soft-cap wait");
+      await delay(150);assert.equal(fixture.settled.length,0);assert.equal(fixture.state.resolved,false);assert.equal(fixture.requests.length,rejected);
+      await fixture.session.steer(`STEERING_${rejected}`);fixture.state.available=0.000001;
+      await fixture.session.prompt("/quota set 100 workflow");
+    }
+    await run;assert.equal(fixture.requests.length,3);assert.equal(fixture.settled.length,1);
+    assert.deepEqual(fixture.pauses.map(p=>p.active),[true,false,true,false]);assert.equal(fixture.widgets.at(-1),undefined);
+    for(let i=0;i<3;i++) assertProjected(fixture.requests[i],i+1);
+    assert.ok(sentContext(fixture.requests[1]).includes("STEERING_1"));assert.ok(sentContext(fixture.requests[2]).includes("STEERING_2"));
+    assert.ok(JSON.stringify(fixture.session.sessionManager.getEntries()).includes(rawContext));assert.deepEqual(fixture.errors,[]);
     } finally {await fixture.close();}
   });
-
-  for (const available of [0,26.975]) {
-    test(`real Pi recovery: ${api}: impossible 296-point reservation with ${available} available is bounded`, {skip:!sdkPath,timeout:15_000}, async () => {
-      const fixture = await lifecycle(api,{available,handle:res=>fail(res,"provisioned_quota_exhausted",296.585)});
-      try {
-        await fixture.start();
-        assert.equal(fixture.requests.length,2,"one live-context rebuild, never endless refill or retries");
-        assert.equal(fixture.settled.length,1);
-        assert.match(fixture.session.messages.at(-1).errorMessage,/cannot fit the rebuilt request/);
-        assert.equal(fixture.state.statusChecks,2,"classification must refresh provisioned capacity on the rebuilt rejection");
-        assert.equal(fixture.pauses.at(-1)?.active,false);
-        assertProjected(fixture.requests[0],1);
-        assertProjected(fixture.requests[1],2);
-        assert.deepEqual(fixture.errors,[]);
-      } finally {await fixture.close();}
-    });
-  }
-
-  test(`real Pi recovery: ${api}: transformed rebuild becomes refillable`, {skip:!sdkPath,timeout:15_000}, async () => {
-    const fixture = await lifecycle(api,{available:10.33,held:14.29,handle:(res,index) => {
-      if(index <= 2) fail(res,"provisioned_quota_exhausted",index === 1 ? 296.585 : 40);
-      else succeed(res,api);
-    }});
-    try {
-      const run = fixture.start();
-      await eventually(()=>fixture.requests.length===2 && fixture.pauses.at(-1)?.active === true,"rebuilt request now fits capacity");
-      await delay(150);
-      assert.equal(fixture.settled.length,0,"a changed sent-view estimate must not inherit a blanket terminal retry guard");
-      assert.equal(fixture.state.resolved,false);
-      assert.equal(fixture.requests.length,2);
-      fixture.state.available = 50;
-      fixture.waiter.wake();
-      await run;
-      assert.equal(fixture.requests.length,3);
-      assert.equal(fixture.settled.length,1);
-      assert.equal(fixture.session.messages.at(-1).stopReason,"stop");
-      assertProjected(fixture.requests[1],2);
-      assertProjected(fixture.requests[2],3);
-      assert.deepEqual(fixture.errors,[]);
+  test(`real Pi soft caps: ${api}: huge obsolete estimate cannot block tiny positive credit`,{skip:!sdkPath,timeout:15000},async()=>{
+    const fixture=await lifecycle(api,{available:0.000001,handle:(res,index)=>index===1?fail(res,"provisioned_quota_exhausted",3000000):succeed(res,api)});
+    try {await fixture.start();assert.equal(fixture.requests.length,2);assert.equal(fixture.settled.length,1);
+      assert.equal(fixture.compactions.length,0);assertProjected(fixture.requests[1],2);assert.deepEqual(fixture.errors,[]);
+      assert.ok(fixture.widgets.every(w=>!w?.join(" ").includes("reservation estimate")));
     } finally {await fixture.close();}
   });
-
-  test(`real Pi recovery: ${api}: raised provisioned capacity makes a rebuilt estimate refillable`, {skip:!sdkPath,timeout:15_000}, async () => {
-    let fixture: Awaited<ReturnType<typeof lifecycle>>;
-    fixture = await lifecycle(api,{available:10.33,held:14.29,handle:(res,index) => {
-      if (index === 2) fixture.state.cap = 300;
-      if (index <= 2) fail(res,"provisioned_quota_exhausted",296.585);
-      else succeed(res,api);
-    }});
-    try {
-      const run = fixture.start();
-      await eventually(()=>fixture.requests.length===2 && fixture.pauses.at(-1)?.active === true,"rebuilt estimate now fits the raised cap");
-      await delay(150);
-      assert.equal(fixture.settled.length,0,"capacity changes must supersede the old impossible classification");
-      assert.equal(fixture.state.resolved,false);
-      assert.equal(fixture.requests.length,2);
-      fixture.state.available = 300;
-      fixture.waiter.wake();
-      await run;
-      assert.equal(fixture.requests.length,3);
-      assert.equal(fixture.settled.length,1);
-      assert.equal(fixture.pauses.at(-1)?.active,false);
-      assert.equal(fixture.session.messages.at(-1).stopReason,"stop");
-      assertProjected(fixture.requests[2],3);
-      assert.deepEqual(fixture.errors,[]);
+  test(`real Pi soft caps: ${api}: near-floor active request gates retries without settling`,{skip:!sdkPath,timeout:15000},async()=>{
+    const fixture=await lifecycle(api,{available:0.2,admissionReady:false,inFlight:1,handle:(res,index)=>index===1?fail(res,"provisioned_quota_exhausted"):succeed(res,api)});
+    try {const run=fixture.start();await eventually(()=>fixture.pauses.at(-1)?.active===true,"in-flight gate");await delay(150);
+      assert.equal(fixture.requests.length,1);assert.equal(fixture.settled.length,0);
+      fixture.state.inFlight=0;fixture.state.admissionReady=true;fixture.waiter.wake();await run;
+      assert.equal(fixture.requests.length,2);assert.equal(fixture.settled.length,1);assert.deepEqual(fixture.errors,[]);
     } finally {await fixture.close();}
   });
-
-  test(`real Pi recovery: ${api}: rebuilt-cap classification survives a status outage with scoped cancellation`, {skip:!sdkPath,timeout:15_000}, async () => {
-    let fixture: Awaited<ReturnType<typeof lifecycle>>;
-    fixture = await lifecycle(api,{available:26.975,
-      statusFailure:()=>fixture.requests.length===2,
-      handle:res=>fail(res,"provisioned_quota_exhausted",296.585)});
-    try {
-      const run = fixture.start();
-      await eventually(()=>fixture.requests.length===2 && fixture.state.statusChecks>=2,"status outage on rebuilt request");
-      await delay(150);
-      assert.equal(fixture.settled.length,0,"an unavailable status is not evidence of impossible capacity");
-      assert.equal(fixture.state.resolved,false);
-      assert.equal(fixture.pauses.at(-1)?.active,true,"all classification waiting belongs to the live pause clock");
-      assert.equal(fixture.requests.length,2);
-      await fixture.session.abort();
-      await run;
-      assert.equal(fixture.settled.length,1);
-      assert.equal(fixture.settled[0].aborted,true);
-      assert.equal(fixture.pauses.at(-1)?.active,false,"Escape must release the classification pause too");
-      assert.equal(fixture.widgets.at(-1),undefined);
-      assert.equal(fixture.workingMessages.at(-1),undefined);
-      assert.deepEqual(fixture.errors,[]);
+  test(`real Pi soft caps: ${api}: forced burn readiness resumes an empty indebted session`,{skip:!sdkPath,timeout:15000},async()=>{
+    const fixture=await lifecycle(api,{available:0,debt:8,admissionReady:false,handle:(res,index)=>index===1?fail(res,"provisioned_quota_exhausted"):succeed(res,api)});
+    try {const run=fixture.start();await eventually(()=>fixture.pauses.at(-1)?.active===true,"empty session waiting before burn");
+      assert.equal(fixture.settled.length,0);fixture.state.admissionReady=true;fixture.waiter.wake();await run;
+      assert.equal(fixture.state.available,0);assert.equal(fixture.requests.length,2);assert.equal(fixture.settled.length,1);
+      assert.deepEqual(fixture.pauses.map(p=>p.active),[true,false]);assert.deepEqual(fixture.errors,[]);
+    } finally {await fixture.close();}
+  });
+  test(`real Pi soft caps: ${api}: status outages remain cancelable without settling early`,{skip:!sdkPath,timeout:15000},async()=>{
+    const fixture=await lifecycle(api,{statusFailure:()=>true,handle:res=>fail(res,"provisioned_quota_exhausted")});
+    try {const run=fixture.start();await eventually(()=>fixture.state.statusChecks>0,"status unavailable");
+      assert.equal(fixture.settled.length,0);await fixture.session.abort();await run;assert.equal(fixture.requests.length,1);
+      assert.equal(fixture.settled.length,1);assert.equal(fixture.pauses.at(-1)?.active,false);assert.deepEqual(fixture.errors,[]);
     } finally {await fixture.close();}
   });
 

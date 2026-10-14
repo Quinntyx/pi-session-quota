@@ -53,3 +53,15 @@ for (const transferred of [-1, 10.000001, "10", null]) {
   await assert.rejects(client.skim(10),/invalid skim result/);
  });
 }
+
+for (const invalid of [{admission_ready:"true"},{in_flight:-1},{in_flight:0.5},{debt:-1}]) {
+  test(`invalid soft-cap readiness metadata is rejected: ${JSON.stringify(invalid)}`,async()=>{
+    const client=new QuotaClient({endpoint:"http://proxy/v1/session-quota",headers:{}},async()=>new Response(JSON.stringify({...status,buckets:[{session:"",cap:250,remaining:1,held:0,available:1,...invalid}]})));
+    await assert.rejects(client.getStatus(),/invalid status payload/);
+  });
+}
+test("soft-cap status preserves explicit false readiness and session debt",async()=>{
+  const payload={...status,admission_mode:"soft",forced_burn:{eligible:false},buckets:[{session:"work",cap:100,remaining:0,held:0,available:0,debt:7,in_flight:1,admission_ready:false}]};
+  const client=new QuotaClient({endpoint:"http://proxy/v1/session-quota",headers:{}},async()=>new Response(JSON.stringify(payload)));
+  assert.deepEqual(await client.getStatus(),payload);
+});

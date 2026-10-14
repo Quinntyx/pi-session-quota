@@ -3,13 +3,7 @@ import { QuotaClient } from "./quota-client.js";
 import { formatPoints } from "./points.js";
 import type { QuotaStatus } from "./types.js";
 
-export type WaitResult = "retry" | "rebuild" | "unfulfillable" | "aborted";
-
-/** Refill restores cap, not today's balance. Over-cap spendable grants may fit too. */
-export function estimateCannotFit(status: QuotaStatus, session: string, requiredPoints = 0): boolean {
-  const bucket = status.buckets.find((item) => item.session === session) ?? status.buckets.find((item) => item.session === "");
-  return Boolean(bucket && requiredPoints > Math.max(bucket.cap, bucket.available) + 1e-9);
-}
+export type WaitResult = "retry" | "aborted";
 
 function abortError(): Error {
   const error = new Error("Quota wait aborted");
@@ -58,34 +52,34 @@ export class QuotaWaiter {
     session: string,
     ctx: ExtensionContext,
     initialRetryAfterSeconds?: number,
-    requiredPoints = 0,
-    allowRebuild = true,
     minimumRetryDelayMs = 0,
   ): Promise<WaitResult> {
     const label = session || "interactive";
     const retryNotBefore = Date.now() + minimumRetryDelayMs;
-    const admissionRecheckAt = Date.now() + 30_000;
     let nextPollAt = Date.now();
     let lastError: string | undefined;
     let availablePoints: number | undefined;
+    let busy = false;
+    let debt = 0;
     let frame = 0;
     const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     const updateUi = () => {
       const seconds = Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1_000));
       const suffix = lastError ? `; status unavailable (${lastError})` : `; recheck in ${seconds}s`;
       const budget = availablePoints === undefined ? "" : `Available: ${formatPoints(availablePoints)} points`;
-      const needed = requiredPoints > 0 ? `; last reservation estimate: ${formatPoints(requiredPoints)} points` : "";
+      const owed = debt > 0 ? `; debt: ${formatPoints(debt)} points` : "";
+      const title = busy ? "Waiting for in-flight request" : "Reached provisioned quota cap, waiting for reset";
       ctx.ui.setStatus("session-quota", `quota waiting: ${label}${suffix}`);
       ctx.ui.setWidget(
         "session-quota",
         [
-          `${frames[frame++ % frames.length]} Reached provisioned quota cap, waiting for reset (${label}).`,
-          ...(budget ? [budget + needed + suffix] : [suffix.slice(2)]),
+          `${frames[frame++ % frames.length]} ${title} (${label}).`,
+          ...(budget ? [budget + owed + suffix] : [suffix.slice(2)]),
           "Workflow remains active. Escape cancels; commands and steering remain available.",
         ],
         { placement: "belowEditor" },
       );
-      ctx.ui.setWorkingMessage("Reached provisioned quota cap, waiting for reset…");
+      ctx.ui.setWorkingMessage(`${title}…`);
     };
     updateUi();
     const ticker = setInterval(updateUi, 250);
@@ -106,19 +100,17 @@ export class QuotaWaiter {
         if (status) {
           const bucket = status.buckets.find((item) => item.session === session) ?? status.buckets.find((item) => item.session === "");
           availablePoints = bucket?.available;
-          // A genuine weekly failure remains native. An impossible estimate gets
-          // one live-context rebuild, even at zero balance; a second impossible
-          // admission cannot be fixed by refill. Ordinary deficits remain pending.
+          // The server owns soft-cap concurrency and actual burn eligibility.
           if (status.all_weekly_exhausted) return "retry";
-          if (estimateCannotFit(status, session, requiredPoints)) return allowRebuild ? "rebuild" : "unfulfillable";
-          const ready = Boolean(bucket && bucket.available > 0 &&
-            (bucket.available + 1e-9 >= requiredPoints || Date.now() >= admissionRecheckAt));
+          debt = bucket?.debt ?? 0;
+          const ready = bucket?.admission_ready ?? Boolean(bucket && bucket.available > 0);
+          busy = Boolean(bucket && !ready && bucket.available > 0 && (bucket.in_flight ?? 0) > 0);
           if (ready && Date.now() >= retryNotBefore) return "retry";
           suggestedDelay = ready ? (retryNotBefore - Date.now()) / 1_000 : status.retry_after_seconds;
         }
 
         const seconds = Number.isFinite(suggestedDelay) && (suggestedDelay ?? 0) > 0 ? suggestedDelay! : 5;
-        const pollMs = Math.min(Math.max(seconds * 1_000, 1_000), 30_000);
+        const pollMs = Math.min(Math.max(seconds * 1_000, 1_000), 5_000);
         nextPollAt = Date.now() + pollMs;
         updateUi();
         try {

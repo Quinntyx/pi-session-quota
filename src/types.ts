@@ -9,6 +9,9 @@ export interface QuotaBucket {
   remaining: number;
   held: number;
   available: number;
+  in_flight?: number;
+  debt?: number;
+  admission_ready?: boolean;
 }
 
 export interface QuotaStatus {
@@ -17,6 +20,9 @@ export interface QuotaStatus {
   all_weekly_exhausted: boolean;
   buckets: QuotaBucket[];
   retry_after_seconds: number;
+  admission_mode?: "soft";
+  near_empty_points?: number;
+  forced_burn?: { eligible: boolean; expires_at?: string };
 }
 
 export interface QuotaErrorBody {

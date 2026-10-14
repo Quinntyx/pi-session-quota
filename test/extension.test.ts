@@ -259,25 +259,12 @@ test("compaction responses and genuine upstream 429s cannot become provisioned w
   assert.equal(calls,0,"neither compaction failures nor untyped upstream 429s may poll quota status");
 });
 
-test("an impossible reservation gets one rebuild, then stops against capacity", async () => {
-  let calls = 0;
-  const extension = harness(async () => { calls++; return response(quotaStatus); }, async () => "renamed-two");
-  const ctx = context();
-  const messageHook = extension.handlers.get("message_end")![0];
-  const turnHook = extension.handlers.get("turn_end")![0];
-
-  await extension.handlers.get("before_agent_start")![0]({},ctx);
-  await extension.handlers.get("turn_start")![0]({},ctx);
-  const impossible = {...assistantError, errorMessage: '429 {"error":{"code":"provisioned_quota_exhausted","required_points":296.585}}'};
-  const firstReplacement = await messageHook({type:"message_end",message:impossible},ctx);
-  const first = await turnHook({type:"turn_end",message:firstReplacement.message,messageEntryId:"first"},ctx);
-  assert.equal(first.continue,true);
-
-  await extension.handlers.get("turn_start")![0]({},ctx);
-  const secondReplacement = await messageHook({type:"message_end",message:impossible},ctx);
-  assert.match(secondReplacement.message.errorMessage,/stopped to avoid an automatic retry loop/);
-  assert.equal(await turnHook({type:"turn_end",message:secondReplacement.message,messageEntryId:"second"},ctx),undefined);
-  assert.equal(calls,2,"refresh capacity before concluding refill cannot fit the rebuilt reservation");
+test("obsolete reservation-size metadata cannot stop positive soft-cap credit", async () => {
+  const extension=harness(async()=>response(quotaStatus),async()=>"renamed-two");
+  const ctx=context();const message={...assistantError,errorMessage:'429 {"error":{"code":"provisioned_quota_exhausted","required_points":296585}}'};
+  const replaced=await extension.handlers.get("message_end")![0]({type:"message_end",message},ctx);
+  const result=await extension.handlers.get("turn_end")![0]({type:"turn_end",message:replaced.message,messageEntryId:"soft"},ctx);
+  assert.equal(result.continue,true);assert.doesNotMatch(replaced.message.errorMessage,/reservation|cannot fit/);
 });
 
 test("structured provisioned errors also get explanatory text; weekly and normal failures are unchanged", async () => {
@@ -309,7 +296,7 @@ test("/quota skim outside tmux targets interactive",async()=>{
 });
 
 
-test("admission hints use recent successful usage without forwarding a failed turn",async()=>{
+test("session attribution no longer emits monetary-admission token/cache hints",async()=>{
  const h=harness(async()=>response(quotaStatus),async()=>"Mysticism");
  const ctx=context();
  Object.assign(ctx,{sessionManager:{getBranch:()=>[
@@ -320,7 +307,5 @@ test("admission hints use recent successful usage without forwarding a failed tu
  for (const handler of h.handlers.get("before_provider_headers") ?? []) await handler(event,ctx);
  assert.deepEqual(event.headers,{
   "X-CLIProxyAPI-Session":"Mysticism",
-  "X-CLIProxyAPI-Quota-Input-Tokens":"90410",
-  "X-CLIProxyAPI-Quota-Cached-Tokens":"78912",
  });
 });

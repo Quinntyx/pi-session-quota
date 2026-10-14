@@ -37,7 +37,10 @@ function isQuotaStatus(value: unknown): value is QuotaStatus {
         typeof bucket.cap === "number" &&
         typeof bucket.remaining === "number" &&
         typeof bucket.held === "number" &&
-        typeof bucket.available === "number",
+        typeof bucket.available === "number" &&
+        (bucket.admission_ready === undefined || typeof bucket.admission_ready === "boolean") &&
+        (bucket.in_flight === undefined || (Number.isInteger(bucket.in_flight) && bucket.in_flight >= 0)) &&
+        (bucket.debt === undefined || (Number.isFinite(bucket.debt) && bucket.debt >= 0)),
     )
   );
 }

@@ -14,10 +14,10 @@ export function formatStatus(status: QuotaStatus): string {
   if (status.buckets.length === 0) {
     lines.push("No session caps.");
   } else {
-    const headings = ["Session", "Cap", "Remaining", "Held", "Available"];
+    const headings = ["Session", "Cap", "Remaining", "Debt", "In flight", "Available"];
     const rows = status.buckets.map((bucket) => [
       sessionLabel(bucket.session), formatPoints(bucket.cap), formatPoints(bucket.remaining),
-      formatPoints(bucket.held), formatPoints(bucket.available),
+      formatPoints(bucket.debt ?? 0), String(bucket.in_flight ?? 0), formatPoints(bucket.available),
     ]);
     const widths = headings.map((heading, column) =>
       Math.max(visibleWidth(heading), ...rows.map((row) => visibleWidth(row[column]))),
@@ -32,6 +32,8 @@ export function formatStatus(status: QuotaStatus): string {
     for (const row of rows) lines.push(rowLine(row));
     lines.push(border("└", "┴", "┘"));
   }
+  if (status.admission_mode === "soft") lines.push("Soft caps: actual usage is charged after each request; overruns reduce future refill.");
+  if (status.forced_burn?.eligible) lines.push("Forced quota burn: eligible waiting work may resume despite its session cap.");
   if (status.retry_after_seconds > 0) lines.push(`Retry after: ${formatPoints(status.retry_after_seconds)}s`);
   return lines.join("\n");
 }
