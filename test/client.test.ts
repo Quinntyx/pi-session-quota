@@ -36,3 +36,20 @@ test("quota client uses encoded names, model auth, and documented bodies", async
   assert.equal(requests[3].init.body, JSON.stringify({ amount: 10, session: "" }));
   assert.equal(requests[4].init.method, undefined);
 });
+
+for (const transferred of [10 + Number.EPSILON * 8, 10 + 5e-9]) {
+ test(`skim tolerates an already-applied rounding excess: ${transferred}`, async () => {
+  let calls = 0;
+  const fetchImpl: typeof fetch = async () => { calls++; return new Response(JSON.stringify({transferred}),{status:200}); };
+  const client = new QuotaClient({endpoint:"https://proxy.example/v1/session-quota",headers:{}},fetchImpl);
+  assert.equal(await client.skim(10),10);
+  assert.equal(calls,1,"must not repeat the already-applied transfer");
+ });
+}
+for (const transferred of [-1, 10.000001, "10", null]) {
+ test(`skim still rejects invalid transfer: ${JSON.stringify(transferred)}`, async () => {
+  const fetchImpl: typeof fetch = async () => new Response(JSON.stringify({transferred}),{status:200});
+  const client = new QuotaClient({endpoint:"https://proxy.example/v1/session-quota",headers:{}},fetchImpl);
+  await assert.rejects(client.skim(10),/invalid skim result/);
+ });
+}

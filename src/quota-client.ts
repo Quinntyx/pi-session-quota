@@ -104,9 +104,12 @@ export class QuotaClient {
       body: JSON.stringify({ amount, session }),
     });
     const transferred = body && typeof body === "object" && "transferred" in body ? body.transferred : undefined;
-    if (typeof transferred !== "number" || !Number.isFinite(transferred) || transferred < 0 || transferred > amount) {
+    // Match the ledger's accounting epsilon. The transfer has already been
+    // applied: rounding dust must not turn success into an error or a retry.
+    const tolerance = 1e-8;
+    if (typeof transferred !== "number" || !Number.isFinite(transferred) || transferred < 0 || transferred > amount + tolerance) {
       throw new Error("Quota API returned an invalid skim result");
     }
-    return transferred;
+    return Math.min(transferred, amount);
   }
 }
