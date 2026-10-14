@@ -79,7 +79,8 @@ export class QuotaClient {
   }
 
   async getStatus(signal?: AbortSignal): Promise<QuotaStatus> {
-    const body = await this.request("", { signal });
+    const query = this.target.model ? `?${new URLSearchParams({ model: this.target.model })}` : "";
+    const body = await this.request(query, { signal });
     if (!isQuotaStatus(body)) throw new Error("Quota API returned an invalid status payload");
     return body;
   }

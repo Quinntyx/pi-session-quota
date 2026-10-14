@@ -56,7 +56,7 @@ for (const outcome of ["resume", "weekly", "abort"] as const) {
     let statusChecks = 0;
     const requests: Array<{header: string | undefined; body: any}> = [];
     const server = createServer(async (req, res) => {
-      if (req.url === "/v1/session-quota") {
+      if (new URL(req.url ?? "/", "http://localhost").pathname === "/v1/session-quota") {
         statusChecks++;
         res.writeHead(200, {"content-type":"application/json"});
         res.end(JSON.stringify({capacity:250,total_remaining:available,all_weekly_exhausted:weekly,retry_after_seconds:60,

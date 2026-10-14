@@ -89,7 +89,7 @@ export async function lifecycle(api: typeof apis[number], options: {
   let projectionCalls = 0;
   let session: any;
   const server = createServer(async (req, res) => {
-    if (req.url === "/v1/session-quota") {
+    if (new URL(req.url ?? "/", "http://localhost").pathname === "/v1/session-quota") {
       state.statusChecks++;
       res.writeHead(options.statusFailure?.() ? 503 : 200, {"content-type":"application/json"});
       res.end(JSON.stringify({capacity:250,total_remaining:state.available + state.held,all_weekly_exhausted:false,retry_after_seconds:60,

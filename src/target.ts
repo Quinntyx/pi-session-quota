@@ -32,6 +32,7 @@ export async function quotaClientForContext(
 
   return new QuotaClient(
     {
+      model: model.id,
       endpoint: quotaEndpoint(auth.baseUrl ?? model.baseUrl),
       headers,
     },

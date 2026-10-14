@@ -35,6 +35,7 @@ export interface QuotaErrorBody {
 }
 
 export interface QuotaTarget {
+  model?: string;
   endpoint: string;
   headers: Record<string, string>;
 }

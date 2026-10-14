@@ -65,3 +65,11 @@ test("soft-cap status preserves explicit false readiness and session debt",async
   const client=new QuotaClient({endpoint:"http://proxy/v1/session-quota",headers:{}},async()=>new Response(JSON.stringify(payload)));
   assert.deepEqual(await client.getStatus(),payload);
 });
+
+test("readiness is scoped to the active model without altering mutation paths",async()=>{
+  const urls:string[]=[];
+  const client=new QuotaClient({endpoint:"http://proxy/v1/session-quota",headers:{},model:"gpt-6.1-sol (high)"},async input=>{urls.push(String(input));return new Response(JSON.stringify(status));});
+  await client.getStatus(); await client.setCap("work",10);
+  assert.equal(new URL(urls[0]).searchParams.get("model"),"gpt-6.1-sol (high)");
+  assert.equal(urls[1],"http://proxy/v1/session-quota/sessions/work");
+});
