@@ -51,3 +51,16 @@ test("session labels align wide glyphs, emoji and combining marks safely", () =>
 test("empty list remains readable", () => {
   assert.match(formatStatus({ ...status, buckets: [] }), /No session caps/);
 });
+
+
+test("quota output never displays obsolete held reservations", () => {
+  for (const admission_mode of [undefined, "soft"] as const) {
+    const output = formatStatus({ ...status, admission_mode, buckets: status.buckets.map((bucket) => ({ ...bucket, held: 987654 })) });
+    const header = output.split("\n").find((line) => line.startsWith("│"));
+    assert.ok(header);
+    assert.doesNotMatch(header, /held/i);
+    assert.doesNotMatch(output, /987654/);
+    assert.match(header, /In flight/);
+    assert.match(header, /Available/);
+  }
+});
